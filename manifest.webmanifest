@@ -1,0 +1,70 @@
+{
+  "id": "./",
+  "name": "VillageLink",
+  "short_name": "VillageLink",
+  "description": "Membres, cotisations, finances, réunions et votes de votre association de ressortissants, visibles par tous les membres.",
+  "lang": "fr",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F5F6F8",
+  "theme_color": "#1B3A8C",
+  "categories": [
+    "finance",
+    "productivity",
+    "social"
+  ],
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "screenshots/caisse.jpg",
+      "sizes": "1080x1920",
+      "type": "image/jpeg",
+      "form_factor": "narrow",
+      "label": "La caisse du village, visible par tous les membres"
+    },
+    {
+      "src": "screenshots/cotisations.jpg",
+      "sizes": "1080x1920",
+      "type": "image/jpeg",
+      "form_factor": "narrow",
+      "label": "Qui a payé, qui est en retard : tout se voit"
+    },
+    {
+      "src": "screenshots/recu.jpg",
+      "sizes": "1080x1920",
+      "type": "image/jpeg",
+      "form_factor": "narrow",
+      "label": "Un reçu WhatsApp pour chaque cotisation"
+    },
+    {
+      "src": "screenshots/projet.jpg",
+      "sizes": "1080x1920",
+      "type": "image/jpeg",
+      "form_factor": "narrow",
+      "label": "Les projets du village, suivis jusqu’au bout"
+    }
+  ],
+  "prefer_related_applications": false
+}

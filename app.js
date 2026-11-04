@@ -1,0 +1,2482 @@
+/* VillageLink — application web (sans compilation).
+   Données : Supabase. Sécurité : règles de la base (voir supabase/schema.sql). */
+'use strict';
+(function () {
+  const CFG = window.VILLAGELINK_CONFIG || {};
+  const root = document.getElementById('root');
+  const NB = ' ';
+
+  /* ------------------------------------------------------------------
+     Démarrage
+  ------------------------------------------------------------------ */
+  if (!window.supabase || !CFG.supabaseUrl || /COLLEZ/.test(CFG.supabaseUrl + CFG.supabaseAnonKey)) {
+    root.innerHTML = `<div class="auth"><div class="brand"><img class="logo brand-ic" src="icon.svg" alt="" width="44" height="44"><b>VillageLink</b></div>
+      <section class="card stack"><h2>Configuration incomplète</h2>
+      <p class="muted" style="margin:0">${!window.supabase
+        ? 'La bibliothèque Supabase n’a pas pu se charger. Vérifiez votre connexion internet puis rechargez la page.'
+        : 'Ouvrez le fichier <b>config.js</b> et collez l’adresse et la clé publique de votre projet Supabase.'}</p></section></div>`;
+    return;
+  }
+  const sb = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+  });
+
+  const S = { session: null, user: null, ctx: null, authMode: 'login', authMsg: '' };
+
+  /* ------------------------------------------------------------------
+     Outils
+  ------------------------------------------------------------------ */
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const $ = s => document.querySelector(s);
+  const pad = n => String(n).padStart(2, '0');
+  const MOIS = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
+  const MOISL = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+  const nf = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 0 });
+  const CUR_LABEL = { XOF: 'FCFA', XAF: 'FCFA', GNF: 'GNF', EUR: '€', USD: '$', CAD: '$ CA', GBP: '£' };
+  const num = n => nf.format(Math.round(Number(n) || 0)).replace(/[   ]/g, NB);
+  const money = (n, cur) => num(n) + NB + (CUR_LABEL[cur || (S.ctx && S.ctx.assoc.currency)] || 'FCFA');
+  const moneyW = n => money(n).replace(/\u00a0(\S+)$/, ' $1');
+  const nf2 = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 2 });
+  const moneyD = (n, cur) => nf2.format(Number(n) || 0).replace(/[\u202f\u00a0 ]/g, NB) + NB + (CUR_LABEL[cur] || cur);
+  const rateFmt = r => new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 6 }).format(Number(r)).replace(/[\u202f\u00a0 ]/g, NB);
+  const origTag = t => (t && t.orig_currency ? moneyD(Math.abs(t.orig_amount), t.orig_currency) : '');
+  const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+  const curYM = () => todayISO().slice(0, 7);
+  const ym = d => String(d || '').slice(0, 7);
+  const dFR = d => { if (!d) return ''; const s = String(d); if (s.length > 10) { const x = new Date(s); return `${x.getDate()}${NB}${MOIS[x.getMonth()]} ${x.getFullYear()}`; } const [y, m, da] = s.split('-').map(Number); return `${da}${NB}${MOIS[m - 1]} ${y}`; };
+  const hm = ts => { const x = new Date(ts); return `${pad(x.getHours())}h${pad(x.getMinutes())}`; };
+  const localDay = ts => { const x = new Date(ts); return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`; };
+  const whenTx = t => !t.created_at ? dFR(t.occurred_on) : (localDay(t.created_at) === String(t.occurred_on)
+    ? `${dFR(t.occurred_on)} à ${hm(t.created_at)}` : `${dFR(t.occurred_on)} (saisi le ${dFR(localDay(t.created_at))} à ${hm(t.created_at)})`);
+  const JOURS = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+  const dLong = ts => { const x = new Date(ts); return `${JOURS[x.getDay()]} ${x.getDate()}${NB}${MOISL[x.getMonth()]} ${x.getFullYear()} à ${hm(ts)}`; };
+  const pFR = p => { const [y, m] = String(p).split('-').map(Number); return `${MOISL[m - 1]} ${y}`; };
+  const addMonth = (p, k) => { let [y, m] = p.split('-').map(Number); m += k; while (m > 12) { m -= 12; y++; } while (m < 1) { m += 12; y--; } return `${y}-${pad(m)}`; };
+  const monthsBetween = (a, b) => { const out = []; let p = a; let guard = 0; while (p <= b && guard++ < 600) { out.push(p); p = addMonth(p, 1); } return out; };
+  const initials = n => String(n || '?').split(/\s+/).filter(Boolean).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+  const txRef = id => 'TX-' + String(id).padStart(5, '0');
+  const digits = s => String(s || '').replace(/\D/g, '');
+  const waShare = text => 'https://wa.me/?text=' + encodeURIComponent(text);
+  const waTo = (phone, text) => { const p = String(phone || '').trim(); const d = digits(p); return (p.startsWith('+') || p.startsWith('00')) && d.length >= 10 ? `https://wa.me/${d.replace(/^00/, '')}?text=${encodeURIComponent(text)}` : waShare(text); };
+  const go = h => { if (location.hash === h) route(); else location.hash = h; };
+  const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* stockage indisponible */ } } };
+
+  /* Thème : clair par défaut (fond lisible en plein soleil) ; sombre ou automatique au choix dans « Mon profil » */
+  const THEMES = [['clair', 'Clair'], ['sombre', 'Sombre'], ['auto', 'Automatique']];
+  const themeNow = () => { const t = store.get('vl:theme'); return THEMES.some(x => x[0] === t) ? t : 'clair'; };
+  const applyTheme = () => {
+    const t = themeNow(), dark = t === 'sombre' || (t === 'auto' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    const meta = document.querySelector('meta[name=theme-color]'); if (meta) meta.setAttribute('content', dark ? '#0E1320' : '#1B3A8C');
+  };
+  applyTheme();
+  if (window.matchMedia) { try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme); } catch (e) { /* ancien navigateur */ } }
+
+  function errMsg(e) {
+    const m = (e && (e.message || e.error_description)) || String(e);
+    if (/row-level security|permission denied/i.test(m)) return 'Vous n’avez pas le droit de faire cette action.';
+    if (/Invalid login credentials/i.test(m)) return 'Email ou mot de passe incorrect.';
+    if (/provider is not enabled|Unsupported provider/i.test(m)) return 'La connexion avec Google n’est pas encore activée. Utilisez votre email pour l’instant.';
+    if (/already registered/i.test(m)) return 'Un compte existe déjà avec cet email. Connectez-vous.';
+    if (/Email not confirmed/i.test(m)) return 'Confirmez d’abord votre email avec le lien reçu, puis connectez-vous.';
+    if (/Password should be at least/i.test(m)) return 'Le mot de passe doit faire au moins 8 caractères.';
+    if (/Failed to fetch|NetworkError|Load failed/i.test(m)) return 'Pas de connexion internet. Réessayez dans un instant.';
+    if (/rate limit|too many/i.test(m)) return 'Trop de tentatives. Patientez quelques minutes.';
+    if (/duplicate key/i.test(m)) return 'Cet élément existe déjà.';
+    return m;
+  }
+  function must(res) { if (res.error) throw res.error; return res.data; }
+  async function fetchAll(make, size = 1000) {
+    const out = [];
+    for (let from = 0; from < 100000; from += size) {
+      const rows = must(await make().range(from, from + size - 1));
+      out.push(...rows);
+      if (rows.length < size) break;
+    }
+    return out;
+  }
+  let toastT;
+  function toast(t) { const el = $('#toast'); el.textContent = t; el.hidden = false; clearTimeout(toastT); toastT = setTimeout(() => { el.hidden = true; }, 2800); }
+
+  const I = {
+    plus: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+    home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>',
+    users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.8c1.9.7 3.1 2.4 3.5 5.2"/></svg>',
+    wallet: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><rect x="3" y="6" width="18" height="14" rx="2.5"/><path d="M3 10.5h18M16 15h2"/></svg>',
+    drop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/><path d="M9.5 15a2.6 2.6 0 0 0 2.5 2.5" stroke-linecap="round"/></svg>',
+    more: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>',
+    bell: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M6 16v-5a6 6 0 0 1 12 0v5l2 2H4z"/><path d="M10 20.5a2 2 0 0 0 4 0" stroke-linecap="round"/></svg>',
+    back: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 5-7 7 7 7"/></svg>',
+    chev: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 5 7 7-7 7"/></svg>',
+    eye: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>',
+    list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>',
+    mega: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M3 10v4h4l7 5V5L7 10z"/><path d="M18 9a4 4 0 0 1 0 6" stroke-linecap="round"/></svg>',
+    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+    vote: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"><path d="M4 13h16v7H4z"/><path d="M8 13V5h8v8"/><path d="m10 9 1.5 1.5L14 8"/></svg>',
+    doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/></svg>',
+    report: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"><path d="M5 3h14v18H5z"/><path d="M9 16v-3M12 16V9M15 16v-5"/></svg>',
+    cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4" stroke-linecap="round"/><path d="m9 15 2 2 4-4" stroke-linecap="round"/></svg>',
+    gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1" stroke-linecap="round"/></svg>',
+    swap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h12l-3-3M17 17H5l3 3"/></svg>',
+    out: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H4"/></svg>',
+    chat: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5" stroke-linecap="round"/></svg>',
+    mic: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
+    bank: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M6 18v-7M10 18v-7M14 18v-7M18 18v-7M12 3l8 5H4z"/></svg>',
+    user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c.8-4 4-6 8-6s7.2 2 8 6"/></svg>',
+    heart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M12 20s-7.5-4.6-9-9.3C1.9 7.2 4.1 4 7.4 4c2 0 3.6 1.1 4.6 2.7C13 5.1 14.6 4 16.6 4c3.3 0 5.5 3.2 4.4 6.7C19.5 15.4 12 20 12 20z"/></svg>',
+    wa: '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a10 10 0 0 0-8.6 15.1L2 22l5-1.3A10 10 0 1 0 12 2zm0 18.2a8.2 8.2 0 0 1-4.2-1.2l-.3-.2-3 .8.8-2.9-.2-.3A8.2 8.2 0 1 1 12 20.2zm4.5-6.1c-.2-.1-1.5-.7-1.7-.8s-.4-.1-.6.1-.6.8-.8 1-.3.2-.5.1a6.7 6.7 0 0 1-3.3-2.9c-.3-.4.2-.4.7-1.4.1-.2 0-.3 0-.4l-.8-1.8c-.2-.5-.4-.4-.6-.4h-.5a1 1 0 0 0-.7.3 3 3 0 0 0-.9 2.2 5.2 5.2 0 0 0 1.1 2.7 11.8 11.8 0 0 0 4.5 4c1.7.7 2.3.8 3.2.6a2.7 2.7 0 0 0 1.8-1.2 2.2 2.2 0 0 0 .2-1.2c-.1-.1-.3-.2-.5-.3z"/></svg>'
+  };
+
+  /* ------------------------------------------------------------------
+     Rôles et droits (la base les vérifie aussi)
+  ------------------------------------------------------------------ */
+  const ROLES = { president: 'Président', vice_president: 'Vice-président', secretaire: 'Secrétaire général', tresorier: 'Trésorier', projets: 'Responsable des projets', membre: 'Membre' };
+  const CAN = {
+    members: ['president', 'vice_president', 'secretaire', 'tresorier'],
+    roles: ['president'],
+    collect: ['tresorier', 'president', 'vice_president'],
+    spend: ['tresorier'],
+    reverse: ['tresorier'],
+    approve: ['president', 'vice_president'],
+    projects: ['president', 'vice_president', 'projets'],
+    announce: ['president', 'vice_president', 'secretaire'],
+    meetings: ['president', 'vice_president', 'secretaire'],
+    polls: ['president', 'vice_president', 'secretaire'],
+    docs: ['president', 'vice_president', 'secretaire', 'tresorier'],
+    collections: ['president', 'vice_president', 'secretaire', 'tresorier'],
+    sections: ['president', 'vice_president', 'secretaire'],
+    categories: ['president', 'vice_president'],
+    settings: ['president']
+  };
+  /* Essai gratuit et abonnement --------------------------------------- */
+  const PLANS = { association: { label: 'Village', max: 50, month: 5000, year: 50000 }, federation: { label: 'Diaspora', max: 200, month: 10000, year: 100000 } };
+  const VL_WAVE = 'https://pay.wave.com/m/M_Ec4ZLH3AZsSi/c/sn/'; // lien Wave de VillageLink pour les abonnements
+  const IS_TWA = (() => { try { if (document.referrer.startsWith('android-app://')) sessionStorage.setItem('vl:twa', '1'); return sessionStorage.getItem('vl:twa') === '1'; } catch (e) { return false; } })();
+  const plusDays = (iso, n) => { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+  const daysUntil = iso => Math.round((Date.parse(iso + 'T12:00:00Z') - Date.parse(todayISO() + 'T12:00:00Z')) / 864e5);
+  const subStatus = a => {
+    if (a && a.blocked_at) return 'blocked';
+    if (!a || !a.trial_ends) return 'trial';
+    const t = todayISO();
+    if (a.paid_until && a.paid_until >= t) return 'active';
+    if (!a.paid_until && a.trial_ends >= t) return 'trial';
+    const end = [a.paid_until, a.trial_ends].filter(Boolean).sort().pop();
+    return plusDays(end, 7) >= t ? 'grace' : 'readonly';
+  };
+  // Formule Village : sans sections, catégories ni plusieurs monnaies, 50 membres au plus. Essai et Diaspora : tout.
+  const fullPlan = () => !S.ctx || S.ctx.assoc.plan !== 'association';
+  const upsell = what => canManageSub() && !IS_TWA ? `<a class="card stack upsell" href="${B()}/abonnement" style="text-decoration:none"><span class="eyebrow">Formule Diaspora</span><b>${what}</b><span class="muted" style="font-size:13.5px">Disponible avec la formule Diaspora : toutes les fonctionnalités, jusqu’à 200 membres.</span></a>` : `<p class="note">${what} : disponible avec la formule Diaspora. Parlez-en au président.</p>`;
+  const isRO = () => !!(S.ctx && ['readonly', 'blocked'].includes(subStatus(S.ctx.assoc)));
+  const canManageSub = () => !!(S.ctx && S.ctx.me && ['president', 'vice_president', 'tresorier'].includes(S.ctx.me.role));
+  const can = a => !!(S.ctx && S.ctx.me && CAN[a].includes(S.ctx.me.role)) && !isRO();
+  // Trésorier de section : encaisse les cotisations des membres de sa section seulement.
+  const mySections = () => (S.ctx.sections || []).filter(x => S.ctx.me && x.treasurer_member_id === S.ctx.me.id).map(x => x.id);
+  const canCollectFor = m => can('collect') || !!(m && m.section_id && mySections().includes(m.section_id));
+  const canCollectAny = () => can('collect') || (mySections().length > 0 && !isRO());
+  // Mobile money : numéros de réception de l'association et déclarations à confirmer
+  const MM = [['Wave', 'wave'], ['Orange Money', 'orange'], ['Free Money', 'free']];
+  const mmAvail = () => { const p = S.ctx.payNums; return p ? MM.filter(([, k]) => p[k]) : []; };
+  const claimsToConfirm = () => (S.ctx.claims || []).filter(c => canCollectFor(S.ctx.byId.get(c.member_id)));
+  const canSetPayNums = () => !!(S.ctx && S.ctx.me && ['president', 'tresorier'].includes(S.ctx.me.role));
+  const secName = id => ((S.ctx.sections || []).find(x => x.id === id) || {}).name || '';
+  const CAT_IN = ['Dons', 'Contributions exceptionnelles', 'Autres'];
+  const CAT_OUT = ['Projet', 'Transport', 'Réunion', 'Communication', 'Administration', 'Autres'];
+  const MODES = ['Espèces', 'Wave', 'Orange Money', 'Free Money', 'MTN Mobile Money', 'Virement', 'Autre'];
+  const PROJECT_TYPES = ['École', 'Forage', 'Mosquée', 'Route', 'Électrification', 'Centre de santé', 'Matériel agricole', 'Autre'];
+  const STATUSES = ['En préparation', 'En cours', 'Suspendu', 'Terminé'];
+  const COL_KINDS = ['Décès', 'Maladie', 'Mariage', 'Naissance', 'Accident', 'Autre'];
+  const ANN_KINDS = ['Annonce', 'Information', 'Convocation', 'Nouvelles du village', 'Urgence'];
+  const CURRENCIES = [['XOF', 'Franc CFA (XOF)'], ['GNF', 'Franc guinéen (GNF)'], ['EUR', 'Euro'], ['USD', 'Dollar US'], ['XAF', 'Franc CFA (XAF)'], ['CAD', 'Dollar canadien'], ['GBP', 'Livre sterling']];
+
+  /* ------------------------------------------------------------------
+     Contexte d'une association
+  ------------------------------------------------------------------ */
+  async function loadCtx(id) {
+    const [a, members, paid, bal] = await Promise.all([
+      sb.from('associations').select('*').eq('id', id).maybeSingle().then(must),
+      fetchAll(() => sb.from('members').select('*').eq('association_id', id).order('full_name').order('id')),
+      fetchAll(() => sb.from('v_member_paid').select('member_id,period,paid').eq('association_id', id).order('period').order('member_id')),
+      sb.from('v_balances').select('*').eq('association_id', id).maybeSingle().then(must)
+    ]);
+    if (!a) { S.ctx = null; return null; }
+    let lastMsg = 0;
+    try { const r = await sb.from('messages').select('id').eq('association_id', id).order('id', { ascending: false }).limit(1); if (!r.error && r.data[0]) lastMsg = r.data[0].id; } catch (e) { /* discussion pas encore installée */ }
+    let notif = 0, lastLog = 0;
+    try {
+      const r = await sb.from('activity_log').select('id').eq('association_id', id).order('id', { ascending: false }).limit(1);
+      if (!r.error && r.data[0]) lastLog = r.data[0].id;
+      const seenKey = 'vl:notif:' + id, seen = Number(store.get(seenKey) || 0);
+      if (!store.get(seenKey)) store.set(seenKey, String(lastLog));
+      else if (lastLog > seen) {
+        const n = await sb.from('activity_log').select('id').eq('association_id', id).gt('id', seen).neq('actor_id', S.user.id).limit(99);
+        if (!n.error) notif = n.data.length;
+      }
+    } catch (e) { /* pas bloquant */ }
+    let sections = [];
+    try { const r = await sb.from('sections').select('*').eq('association_id', id).order('name'); if (!r.error) sections = r.data || []; } catch (e) { /* sections pas encore installées */ }
+    let cats = [];
+    try { const r = await sb.from('member_categories').select('*').eq('association_id', id).order('fee_amount', { ascending: false }); if (!r.error) cats = r.data || []; } catch (e) { /* catégories pas encore installées */ }
+    let exempts = [];
+    try { const r = await sb.from('member_exemptions').select('id,member_id,from_period,to_period,created_label,created_at,ended_label').eq('association_id', id).order('from_period'); if (!r.error) exempts = r.data || []; } catch (e) { /* dispenses pas encore installées */ }
+    let payNums = null, claims = [];
+    try { const r = await sb.from('pay_numbers').select('*').eq('association_id', id).maybeSingle(); if (!r.error) payNums = r.data || null; } catch (e) { /* mobile money pas encore installé */ }
+    try { const r = await sb.from('payment_claims').select('*').eq('association_id', id).eq('status', 'pending').order('id', { ascending: true }).limit(99); if (!r.error) claims = r.data || []; } catch (e) { /* idem */ }
+    let expPending = 0;
+    try { const r = await sb.from('expense_requests').select('id').eq('association_id', id).eq('status', 'En attente').limit(99); if (!r.error) expPending = r.data.length; } catch (e) { /* double validation pas encore installée */ }
+    try { if (navigator.setAppBadge) { if (notif) navigator.setAppBadge(notif); else navigator.clearAppBadge(); } } catch (e) { /* non pris en charge */ }
+    const paidMap = new Map();
+    paid.forEach(r => paidMap.set(r.member_id + '|' + r.period, Number(r.paid)));
+    const me = members.find(m => m.user_id === S.user.id) || null;
+    S.ctx = { loadedAt: Date.now(), lastMsg, notif, expPending, payNums, claims, exempts, sections, cats, lastLog, assoc: a, me, members, byId: new Map(members.map(m => [m.id, m])), paidMap,
+      bal: { in: Number(bal ? bal.total_in : 0), out: Number(bal ? bal.total_out : 0) } };
+    store.set('vl:last', id);
+    return S.ctx;
+  }
+  const refresh = () => loadCtx(S.ctx.assoc.id);
+  const paidFor = (mid, p) => S.ctx.paidMap.get(mid + '|' + p) || 0;
+  // Cotisation mensuelle d'un membre : celle de sa catégorie, sinon la cotisation générale.
+  const catOf = m => (m && m.category_id ? (S.ctx.cats || []).find(c => c.id === m.category_id) : null) || null;
+  const feeOf = m => { const c = catOf(m); return Number(c ? c.fee_amount : S.ctx.assoc.fee_amount) || 0; };
+  const hasFees = () => Number(S.ctx.assoc.fee_amount) > 0 || (S.ctx.cats || []).some(c => Number(c.fee_amount) > 0);
+  const exemptOf = (m, p) => (S.ctx.exempts || []).find(e => e.member_id === m.id && e.from_period <= p && (!e.to_period || e.to_period >= p)) || null;
+  const dueIn = (m, p) => feeOf(m) > 0 && [ym(S.ctx.assoc.dues_start), ym(m.joined_on)].sort().pop() <= p && !exemptOf(m, p);
+  function dues(m) {
+    const a = S.ctx.assoc, fee = feeOf(m), cur = curYM();
+    if (!fee || !m.active || m.pending) return { owed: [], late: [], remaining: 0, isLate: false };
+    const start = [ym(a.dues_start), ym(m.joined_on)].sort().pop();
+    const periods = start <= cur ? monthsBetween(start, cur).filter(p => !exemptOf(m, p)) : [];
+    const owed = periods.filter(p => paidFor(m.id, p) < fee);
+    // Un mois est en retard quand son échéance est passée. Pour les mois suivis depuis la
+    // création de l'association dans l'app, l'échéance doit aussi tomber après l'adhésion
+    // et après cette création (sinon tout le monde serait en retard dès le premier jour).
+    const created = String(a.created_at || '').slice(0, 10) || todayISO();
+    const since = [created, String(m.joined_on || '')].sort().pop();
+    const isLate = p => {
+      const due = `${p}-${pad(a.fee_due_day)}`;
+      if (due >= todayISO()) return false;
+      if (p < ym(created)) return true;
+      return due >= since;
+    };
+    const late = owed.filter(isLate);
+    return { owed, late, remaining: owed.reduce((s, p) => s + fee - paidFor(m.id, p), 0), isLate: late.length > 0 };
+  }
+  const activeMembers = () => S.ctx.members.filter(m => m.active && !m.pending);
+  const pendingMembers = () => S.ctx.members.filter(m => m.pending);
+  const lateMembers = () => activeMembers().filter(m => dues(m).isLate);
+  const memberName = id => (S.ctx.byId.get(id) || {}).full_name || 'Membre retiré';
+  const statusPill = m => {
+    if (m.pending) return '<span class="pill p-late">Demande en attente</span>';
+    if (!m.active) return '<span class="pill p-blue">Retiré</span>';
+    if (!feeOf(m)) return hasFees() ? '<span class="pill p-blue">Dispensé</span>' : '';
+    const d = dues(m);
+    if (!d.isLate && exemptOf(m, curYM())) return '<span class="pill p-blue">Dispensé</span>';
+    if (d.isLate) return `<span class="pill p-late">${d.late.length > 1 ? d.late.length + ' mois de retard' : 'En retard'}</span>`;
+    if (d.owed.length) return '<span class="pill p-blue">À payer</span>';
+    return '<span class="pill p-ok">À jour</span>';
+  };
+
+  /* ------------------------------------------------------------------
+     Routeur
+  ------------------------------------------------------------------ */
+  function parseHash() {
+    const h = location.hash.replace(/^#/, '') || '/';
+    const [path, qs] = h.split('?');
+    return { parts: path.split('/').filter(Boolean), q: new URLSearchParams(qs || '') };
+  }
+
+  async function route() {
+    if (/^#(access_token|error)=/.test(location.hash)) {
+      const p = new URLSearchParams(location.hash.slice(1));
+      if (p.get('error')) { S.authMsg = 'Ce lien a expiré ou a déjà servi. Demandez-en un nouveau.'; history.replaceState(null, '', location.pathname); }
+      else return;
+    }
+    const { parts, q } = parseHash();
+    try {
+      if (!S.session) { if (!document.querySelector('form[data-form=auth]')) renderAuth(); return; }
+      if (parts[0] === 'mot-de-passe') return renderNewPassword();
+      if (parts[0] === 'bienvenue') return await renderWelcome();
+      if (parts[0] === 'admin') return await renderAdmin();
+      if (parts[0] === 'a' && parts[1]) return await renderAssoc(parts[1], parts.slice(2), q);
+      return await goHome();
+    } catch (e) {
+      console.error(e);
+      root.innerHTML = `<div class="auth"><section class="card stack"><h2>Impossible d’afficher la page</h2><p class="muted" style="margin:0">${esc(errMsg(e))}</p><button class="btn primary" data-act="reload">Réessayer</button><a class="link" href="#/bienvenue">Revenir à mes associations</a></section></div>`;
+    }
+  }
+
+  async function goHome() {
+    const last = store.get('vl:last');
+    let rows;
+    try { rows = must(await sb.rpc('my_memberships')); }
+    catch (e) { if (last) return go('#/a/' + last); throw e; }   // hors ligne : on rouvre la dernière association
+    const list = rows.filter(a => a.active && !a.pending).map(a => ({ id: a.association_id, name: a.name }));
+    if (list.length === 1) return go('#/a/' + list[0].id);
+    if (last && list.some(a => a.id === last)) return go('#/a/' + last);
+    return go('#/bienvenue');
+  }
+
+  /* ------------------------------------------------------------------
+     Connexion
+  ------------------------------------------------------------------ */
+  function renderAuth() {
+    const m = S.authMode;
+    root.innerHTML = `<div class="auth">
+      <div class="brand"><img class="logo brand-ic" src="icon.svg" alt="" width="44" height="44"><b>VillageLink</b></div>
+      <p class="lead">L’argent de l’association, visible par tous les membres.</p>
+      ${m !== 'reset' ? `<div class="seg" role="group"><button data-act="auth-mode" data-mode="login" aria-pressed="${m === 'login'}">Se connecter</button><button data-act="auth-mode" data-mode="signup" aria-pressed="${m === 'signup'}">Créer un compte</button></div>` : ''}
+      ${S.authMsg ? `<p class="note">${esc(S.authMsg)}</p>` : ''}
+      ${m !== 'reset' && (window.VILLAGELINK_CONFIG || {}).google !== false ? `<button class="btn ghost block google-btn" type="button" data-act="google"><svg width="20" height="20" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg> Continuer avec Google</button><div class="or"><span>ou avec votre email</span></div>` : ''}
+      <form class="card stack" data-form="auth" novalidate>
+        <div class="field"><label for="au-email">Email</label><input id="au-email" name="email" type="email" autocomplete="email" inputmode="email" required></div>
+        ${m !== 'reset' ? `<div class="field"><label for="au-pw">Mot de passe</label><input id="au-pw" name="password" type="password" autocomplete="${m === 'signup' ? 'new-password' : 'current-password'}" minlength="8" required>${m === 'signup' ? '<p class="help">8 caractères minimum.</p>' : ''}</div>` : ''}
+        <p class="err" hidden></p>
+        <button class="btn primary block" type="submit">${m === 'login' ? 'Se connecter' : m === 'signup' ? 'Créer mon compte' : 'Recevoir le lien'}</button>
+        ${m === 'login' ? '<button class="link" type="button" data-act="auth-mode" data-mode="reset">Mot de passe oublié ?</button>' : ''}
+        ${m === 'reset' ? '<button class="link" type="button" data-act="auth-mode" data-mode="login">Retour à la connexion</button>' : ''}
+      </form>
+      <p class="help">Les membres sans smartphone n’ont pas besoin de compte : le trésorier enregistre leurs paiements.</p>
+      <p class="help">En continuant, vous acceptez les <a class="link" href="conditions.html">conditions d’utilisation</a> et la <a class="link" href="confidentialite.html">politique de confidentialité</a>.</p>
+    </div>`;
+  }
+
+  function renderNewPassword() {
+    root.innerHTML = `<div class="auth"><div class="brand"><img class="logo brand-ic" src="icon.svg" alt="" width="44" height="44"><b>VillageLink</b></div>
+      <form class="card stack" data-form="newpw" novalidate><h2>Nouveau mot de passe</h2>
+      <div class="field"><label for="np-pw">Mot de passe</label><input id="np-pw" name="password" type="password" autocomplete="new-password" minlength="8" required></div>
+      <p class="err" hidden></p><button class="btn primary block" type="submit">Enregistrer</button></form></div>`;
+  }
+
+  /* ------------------------------------------------------------------
+     Accueil sans association : créer ou rejoindre
+  ------------------------------------------------------------------ */
+  // Tableau de bord du propriétaire : totaux globaux, aucune donnée personnelle.
+  async function renderAdmin() {
+    root.innerHTML = '<div class="loading">Chargement du tableau de bord…</div>';
+    const r = await sb.rpc('owner_stats');
+    if (r.error) { root.innerHTML = `<div class="auth"><section class="card stack"><h2>Accès réservé</h2><p class="muted" style="margin:0">Ce tableau de bord est réservé au propriétaire de VillageLink.</p><a class="btn primary" href="#/bienvenue">Mes associations</a></section></div>`; return; }
+    const d = r.data, N = n => num(n), pc = (a, b) => (b ? Math.round(a / b * 100) : 0);
+    const subs = await sb.rpc('owner_subscriptions').then(x => x.error ? null : x.data, () => null);
+    const SUBST = { trial: ['p-blue', 'Essai'], active: ['p-ok', 'Abonnée'], grace: ['p-late', 'Grâce'], readonly: ['p-red', 'Lecture seule'], blocked: ['p-red', 'Bloquée'] };
+    const untilFor = q => { const base = [(subs.assocs.find(x => x.id === q.association_id) || {}).paid_until, todayISO()].filter(Boolean).sort().pop(); const dd = new Date(base + 'T12:00:00Z'); dd.setUTCMonth(dd.getUTCMonth() + q.months); return dd.toISOString().slice(0, 10); };
+    const subsHtml = sd => `<section class="card stack"><h2>Abonnements</h2>
+        ${sd.requests.length ? sd.requests.map(q => `<div class="stack" style="gap:8px;border-bottom:1px solid var(--line);padding-bottom:12px"><b>${esc(q.assoc_name)}</b><span class="num">${money(q.amount, 'XOF')} · formule ${esc((PLANS[q.plan] || {}).label || q.plan)} · ${q.months === 12 ? '1 an' : '1 mois'}</span><span class="muted" style="font-size:13px">Déclaré le ${dFR(localDay(q.created_at))} par ${esc(q.created_label)}${q.reference ? ' · réf. ' + esc(q.reference) : ''}</span><span class="help" style="margin:0">Vérifiez dans votre application Wave que ce paiement est bien arrivé avant d’activer.</span>
+          <div class="row" style="flex-wrap:wrap"><button class="btn primary sm" data-act="own-act" data-id="${q.id}" data-until="${untilFor(q)}">Activer jusqu’au ${dFR(untilFor(q))}</button><button class="btn ghost sm" data-act="own-rej" data-id="${q.id}">Refuser</button></div>
+          <form class="stack" data-form="ownreject" data-id="${q.id}" id="orj-${q.id}" hidden novalidate><input name="note" placeholder="Motif (ex. rien reçu sur Wave)"><p class="err" hidden></p><button class="btn danger sm" type="submit">Refuser ce paiement</button></form></div>`).join('') : '<span class="muted">Aucun paiement à valider.</span>'}
+        <div class="list">${sd.assocs.map(x => { const [c, l] = SUBST[x.status] || ['p-blue', x.status]; return `<div class="item"><div class="body"><div class="t">${esc(x.name)}</div><div class="s wrap num">${N(x.members)} membres · ${x.paid_until ? 'payé jusqu’au ' + dFR(x.paid_until) : 'essai jusqu’au ' + dFR(x.trial_ends)}</div><button class="btn ghost sm" style="margin-top:6px" data-act="own-trial" data-id="${x.id}" data-te="${x.trial_ends}" data-pu="${x.paid_until || ''}">+30 jours d’essai</button> ${x.status === 'blocked' ? `<button class="btn primary sm" style="margin-top:6px" data-act="own-unblock" data-id="${x.id}">Débloquer</button><div class="s wrap">Motif : ${esc(x.blocked_reason || '')}</div>` : `<button class="btn ghost sm" style="margin-top:6px" data-act="own-block" data-id="${x.id}">Bloquer</button><form class="stack" data-form="ownblock" data-id="${x.id}" id="obk-${x.id}" hidden novalidate><input name="note" placeholder="Motif (ex. abonnement non payé)"><p class="err" hidden></p><button class="btn danger sm" type="submit">Bloquer cette association</button></form>`}</div><span class="pill ${c}">${l}</span></div>`; }).join('')}</div></section>`;
+    const wk = d.weekly || [], maxA = Math.max(1, ...wk.map(w => w.users));
+    const ago = ts => { if (!ts) return 'jamais'; const h = (Date.now() - new Date(ts)) / 3600e3; return h < 1 ? 'il y a moins d’1 h' : h < 24 ? `il y a ${Math.round(h)} h` : `il y a ${Math.round(h / 24)} j`; };
+    const health = a => { const h = a.last_activity ? (Date.now() - new Date(a.last_activity)) / 864e5 : 999; return h <= 7 ? ['p-ok', 'Active'] : h <= 30 ? ['p-late', 'Ralentit'] : ['p-red', 'Endormie']; };
+    const tile = (v, l, s2) => `<div class="stat"><span class="v num">${v}</span><span class="l">${l}</span>${s2 ? `<span class="l">${s2}</span>` : ''}</div>`;
+    root.innerHTML = `<div class="auth admin" style="max-width:720px">
+      <div class="between"><a class="brand" href="#/bienvenue" style="text-decoration:none;color:inherit"><img class="logo brand-ic" src="icon.svg" alt="" width="44" height="44"><b>Tableau de bord</b></a><button class="btn ghost sm" data-act="reload">Actualiser</button></div>
+      <p class="muted" style="margin:0;font-size:13px">Chiffres de toutes les associations, au ${dFR(d.generated_at)} à ${hm(d.generated_at)}.</p>
+      <div class="grid2">
+        ${tile(N(d.associations), 'Associations', d.associations_30d ? '+' + N(d.associations_30d) + ' en 30 jours' : 'aucune nouvelle en 30 jours')}
+        ${tile(N(d.members), 'Membres', N(d.members_on_app) + ' sur l’application (' + pc(d.members_on_app, d.members) + NB + '%)')}
+        ${tile(N(d.active_users_7d), 'Actifs cette semaine', N(d.active_users_30d) + ' sur 30 jours')}
+        ${tile(N(d.accounts), 'Comptes créés', d.accounts_30d ? '+' + N(d.accounts_30d) + ' en 30 jours' : '')}
+        ${tile(N(d.tx_30d), 'Opérations en 30 jours', '')}
+        ${tile(N(d.push_devices), 'Téléphones avec rappels', '')}
+      </div>
+      ${(d.volume || []).length ? `<section class="card stack"><h2>Argent suivi dans VillageLink</h2>${d.volume.map(v => `<div class="between num"><span>Encaissé en ${esc(CUR_LABEL[v.currency] || v.currency)}</span><b>${money(v.total_in || 0, v.currency)}</b></div>`).join('')}</section>` : ''}
+      <section class="card stack"><h2>Personnes actives par semaine</h2>
+        ${wk.length ? `<div class="wkbars" role="img" aria-label="Personnes actives par semaine sur 12 semaines">${wk.map(w => `<div class="wk"><span class="n num">${w.users}</span><i style="height:${Math.max(4, Math.round(w.users / maxA * 100))}%"></i><small>${new Date(w.week + 'T12:00:00').getDate()}/${new Date(w.week + 'T12:00:00').getMonth() + 1}</small></div>`).join('')}</div>` : '<span class="muted">Pas encore d’activité.</span>'}
+        <p class="help">Une personne est active quand elle fait une action (paiement, message, vote…) dans la semaine.</p></section>
+      ${subs ? subsHtml(subs) : ''}
+      <h2>Associations</h2>
+      <div class="list">${(d.list || []).map(a => { const [cl, lb] = health(a); return `<div class="item"><div class="body"><div class="t">${esc(a.name)}</div><div class="s wrap num">${N(a.members)} membres · ${N(a.on_app)} sur l’app${a.pending ? ' · ' + N(a.pending) + ' en attente' : ''} · ${N(a.actions_30d)} actions en 30 j · dernière ${ago(a.last_activity)}</div><div class="s wrap num">${esc([a.village, a.residence_city].filter(Boolean).join(' · '))} · créée le ${dFR(a.created_at)} · solde ${money(a.balance, a.currency)}</div></div><span class="pill ${cl}">${lb}</span></div>`; }).join('') || '<div class="empty">Aucune association.</div>'}</div>
+      <a class="link" href="#/bienvenue">Revenir à mes associations</a></div>`;
+  }
+
+  const delAcctBox = () => `<details class="card more" id="del-acct"><summary>Supprimer mon compte</summary>
+      <form class="stack" data-form="delacct" novalidate style="margin-top:10px">
+        <p class="muted" style="margin:0;font-size:13.5px">Votre compte de connexion (${esc(S.user.email || '')}) sera supprimé définitivement, avec vos rappels sur ce téléphone. Votre fiche de membre et les opérations déjà enregistrées restent dans l’historique de l’association, pour la transparence des comptes ; le bureau peut retirer votre fiche.</p>
+        <div class="field"><label for="da-c">Tapez SUPPRIMER pour confirmer</label><input id="da-c" name="confirm" autocomplete="off" autocapitalize="characters" spellcheck="false"></div>
+        <p class="err" hidden></p><button class="btn danger block" type="submit">Supprimer définitivement mon compte</button>
+        <p class="help">Vous pouvez aussi écrire à contact@villagelinkafrica.com.</p></form></details>`;
+
+  async function renderWelcome() {
+    const list = must(await sb.rpc('my_memberships')).filter(a => a.active || a.pending);
+    const owner = await sb.rpc('am_owner').then(r => !r.error && r.data === true, () => false);
+    root.innerHTML = `<div class="auth" style="max-width:520px">
+      ${owner ? `<a class="card between" href="#/admin" style="border-color:var(--gold)"><span><span class="eyebrow">Propriétaire</span><br><b>Tableau de bord VillageLink</b></span><span class="chev">${I.chev}</span></a>` : ''}
+      <div class="between"><div class="brand"><img class="logo brand-ic" src="icon.svg" alt="" width="44" height="44"><b>VillageLink</b></div><button class="btn ghost sm" data-act="signout">Déconnexion</button></div>
+      ${list.some(a => a.pending) ? '<button class="btn ghost block" data-act="reload">Actualiser : ma demande a-t-elle été validée ?</button>' : ''}
+      ${list.length ? `<section class="stack"><span class="eyebrow">Mes associations</span><div class="list">${list.map(a => a.pending
+        ? `<div class="item"><div class="logo letter">${esc(initials(a.name).slice(0, 1))}</div><div class="body"><div class="t">${esc(a.name)}</div><div class="s wrap">Demande envoyée. Un membre du bureau doit la valider.</div></div><span class="pill p-late">En attente</span></div>`
+        : `<a class="item" href="#/a/${a.association_id}"><div class="logo letter">${esc(initials(a.name).slice(0, 1))}</div><div class="body"><div class="t">${esc(a.name)}</div><div class="s">${esc([a.village, a.residence_city].filter(Boolean).join(' · '))}</div></div><span class="chev">${I.chev}</span></a>`).join('')}</div></section>` : '<p class="lead">Bienvenue. Rejoignez votre association avec le code donné par le bureau, ou créez-la si vous en êtes le président.</p>'}
+      <form class="card stack" data-form="join" novalidate><h2>Rejoindre une association</h2>
+        <div class="field"><label for="jn-code">Code d’invitation</label><input id="jn-code" name="code" autocapitalize="characters" placeholder="Ex. 7K2P9QXA" required></div>
+        <div class="field"><label for="jn-name">Votre nom complet</label><input id="jn-name" name="full_name" autocomplete="name" required></div>
+        <div class="field"><label for="jn-phone">Votre téléphone</label><input id="jn-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+221 77 000 00 00"><p class="help">Si le trésorier vous a déjà inscrit avec ce numéro, votre historique de cotisations vous suit. Le bureau valide chaque demande.</p></div>
+        <p class="err" hidden></p><button class="btn primary block" type="submit">Rejoindre</button></form>
+      <form class="card stack" data-form="create" novalidate><h2>Créer une association</h2><p class="help">Vous en deviendrez le président. Vous pourrez ensuite nommer le trésorier et le reste du bureau.</p>
+        <div class="field"><label for="cr-name">Nom de l’association</label><input id="cr-name" name="name" placeholder="Ex. Ressortissants de Kansaghel au Sénégal" required></div>
+        <div class="field"><label for="cr-you">Votre nom complet</label><input id="cr-you" name="full_name" autocomplete="name" required></div>
+        <div class="field"><label for="cr-phone">Votre téléphone</label><input id="cr-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel"></div>
+        <span class="eyebrow">Village d’origine</span>
+        <div class="row2"><div class="field"><label for="cr-village">Village ou ville</label><input id="cr-village" name="village" required></div><div class="field"><label for="cr-ocountry">Pays</label><input id="cr-ocountry" name="origin_country" placeholder="Ex. Guinée"></div></div>
+        <div class="row2"><div class="field"><label for="cr-region">Région</label><input id="cr-region" name="region"></div><div class="field"><label for="cr-pref">Préfecture</label><input id="cr-pref" name="prefecture"></div></div>
+        <span class="eyebrow">Où vit l’association</span>
+        <div class="row2"><div class="field"><label for="cr-rcity">Ville</label><input id="cr-rcity" name="residence_city" placeholder="Ex. Dakar"></div><div class="field"><label for="cr-rcountry">Pays</label><input id="cr-rcountry" name="residence_country" placeholder="Ex. Sénégal"></div></div>
+        <span class="eyebrow">Cotisation</span>
+        <div class="row2"><div class="field"><label for="cr-cur">Monnaie</label><select id="cr-cur" name="currency">${CURRENCIES.map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></div><div class="field"><label for="cr-fee">Montant par mois</label><input id="cr-fee" name="fee" type="number" inputmode="numeric" min="0" step="1" placeholder="Ex. 5000"></div></div>
+        <div class="field"><label for="cr-due">Jour d’échéance chaque mois</label><input id="cr-due" name="due_day" type="number" inputmode="numeric" min="1" max="28" value="5"></div>
+        <p class="err" hidden></p><button class="btn primary block" type="submit">Créer l’association</button></form>
+      ${delAcctBox()}
+    </div>`;
+  }
+
+  /* ------------------------------------------------------------------
+     Cadre d'une association
+  ------------------------------------------------------------------ */
+  /* Navigation v2 : 5 onglets. Chaque onglet regroupe ses pages : barre de segments sur téléphone, sous-menu à gauche sur ordinateur. */
+  const LOGO = '<svg class="logo" viewBox="0 0 40 40" role="img" aria-label="VillageLink"><rect width="40" height="40" rx="10" fill="var(--color-primary)"/><path d="M11 21 20 13l9 8v8H11z" fill="none" stroke="var(--color-on-primary)" stroke-width="2.6" stroke-linejoin="round"/><circle cx="20" cy="22.5" r="2.6" fill="var(--color-on-primary)"/></svg>';
+  const NAV = [
+    { tab: '', label: 'Accueil', icon: I.home, keys: ['home'] },
+    { tab: 'membres', label: 'Membres', icon: I.users, keys: ['membres', 'm', 'sections'] },
+    { tab: 'cotisations', label: 'Cotisations', icon: I.wallet, keys: ['cotisations', 'encaisser', 'payer'] },
+    { tab: 'caisse', label: 'Caisse', icon: I.bank, keys: ['caisse', 'finances', 'operation', 'op', 'recu', 'depenses', 'depense', 'projets', 'p', 'collectes', 'collecte', 'transparence', 'rapport', 'journal'] },
+    { tab: 'vie', label: 'Vie', icon: I.heart, keys: ['vie', 'annonces', 'discussion', 'reunions', 'r', 'votes', 'vote', 'documents'] }
+  ];
+  const SUBS = group => {
+    const A = S.ctx.assoc, nPend = can('members') ? pendingMembers().length : 0, nClaims = claimsToConfirm().length;
+    if (group === 'membres') return [{ href: 'membres', label: 'Liste', keys: ['membres', 'm'], notF: 'pending', mobile: 1 }, { href: 'sections', label: 'Sections', keys: ['sections'], mobile: 1 }].concat(nPend ? [{ href: 'membres?f=pending', label: 'Demandes', keys: ['membres'], f: 'pending', n: nPend, mobile: 1 }] : []);
+    if (group === 'cotisations') return [{ href: 'cotisations', label: 'Ce mois', keys: ['cotisations', 'encaisser', 'payer'], notF: 'claims' }].concat(nClaims ? [{ href: 'cotisations?f=claims', label: 'Paiements à confirmer', keys: ['cotisations'], f: 'claims', n: nClaims }] : []);
+    if (group === 'caisse') return [{ href: 'finances', label: 'Mouvements', keys: ['caisse', 'finances', 'operation', 'op', 'recu'], mobile: 1 }].concat(A.expense_approval || S.ctx.expPending ? [{ href: 'depenses', label: 'Dépenses à valider', keys: ['depenses', 'depense'], n: S.ctx.expPending }] : [], [{ href: 'projets', label: 'Projets', keys: ['projets', 'p'], mobile: 1 }, { href: 'collectes', label: 'Solidarité', keys: ['collectes', 'collecte'], mobile: 1 }, { href: 'transparence', label: 'Transparence', keys: ['transparence'], mobile: 1 }, { href: 'rapport', label: 'Rapport mensuel', keys: ['rapport'] }, { href: 'journal', label: 'Journal d’activité', keys: ['journal'] }]);
+    if (group === 'vie') return [['annonces', 'Annonces'], ['discussion', 'Discussion'], ['reunions', 'Réunions', ['reunions', 'r']], ['votes', 'Votes', ['votes', 'vote']], ['documents', 'Documents']].map(([h, l, k]) => ({ href: h, label: l, keys: k || [h] }));
+    return [];
+  };
+  const subOn = (s, key, q) => s.keys.includes(key) && (s.f ? q.get('f') === s.f : !(s.notF && q.get('f') === s.notF));
+  const HUB_KEYS = ['membres', 'sections', 'caisse', 'finances', 'projets', 'collectes', 'transparence'];
+  const hubTop = (grp, key, sub, q) => {
+    if (!grp || !HUB_KEYS.includes(key) || sub[1]) return '';
+    const items = SUBS(grp.tab).filter(x => x.mobile);
+    return `<h1>${grp.label}</h1><nav class="hubnav" aria-label="${grp.label}">${items.map(x => `<a href="${B()}/${x.href}" ${subOn(x, key, q) ? 'aria-current="page"' : ''}>${x.label}${x.n ? `<span class="cnt">${x.n}</span>` : ''}</a>`).join('')}</nav>`;
+  };
+  // Barre d'action fixe au-dessus de la navigation (téléphone) : l'action principale du rôle
+  const ctaFor = (key, sub) => {
+    if (isRO() || sub[1] || !canCollectAny()) return '';
+    if (key === 'home') return `<a class="btn primary" href="${B()}/encaisser">${I.plus} Encaisser une cotisation</a>`;
+    if (key === 'cotisations') return `<a class="btn ghost" href="${B()}/cotisations?f=late">Relancer</a><a class="btn primary" href="${B()}/encaisser">${I.plus} Encaisser</a>`;
+    return '';
+  };
+  // Bouton principal en haut de page sur ordinateur
+  const topAction = () => {
+    if (isRO()) return '';
+    const me = S.ctx.me;
+    if (can('approve') && S.ctx.expPending) return `<a class="btn primary sm top-act" href="${B()}/depenses">Dépenses à valider (${S.ctx.expPending})</a>`;
+    if (canCollectAny()) return `<a class="btn primary sm top-act" href="${B()}/encaisser">Encaisser une cotisation</a>`;
+    if (me && hasFees() && feeOf(me) > 0 && mmAvail().length && dues(me).remaining > 0) return `<a class="btn primary sm top-act" href="${B()}/payer">Payer ma cotisation</a>`;
+    return '';
+  };
+
+  async function renderAssoc(id, sub, q) {
+    if (!S.ctx || S.ctx.assoc.id !== id) {
+      root.innerHTML = '<div class="loading">Chargement de l’association…</div>';
+      await loadCtx(id);
+    } else if (Date.now() - S.ctx.loadedAt > 15000) {
+      // Données de plus de 15 secondes : on recharge pour voir les nouvelles demandes, paiements, etc.
+      try { await loadCtx(id); } catch (e) { console.error(e); }
+    }
+    if (!S.ctx) {
+      const mine = (must(await sb.rpc('my_memberships')) || []).find(a => a.association_id === id);
+      if (mine && mine.pending) {
+        root.innerHTML = `<div class="auth"><section class="card stack"><h2>Demande en attente</h2><p class="muted" style="margin:0">Votre demande pour rejoindre « ${esc(mine.name)} » doit être validée par le président, le secrétaire ou le trésorier. Prévenez-les sur WhatsApp.</p><a class="btn primary" href="#/bienvenue">Mes associations</a></section></div>`;
+        return;
+      }
+      root.innerHTML = `<div class="auth"><section class="card stack"><h2>Association introuvable</h2><p class="muted" style="margin:0">Elle n’existe pas, ou vous n’en êtes pas membre.</p><a class="btn primary" href="#/bienvenue">Mes associations</a></section></div>`;
+      return;
+    }
+    if (!S.ctx.me || !S.ctx.me.active) {
+      root.innerHTML = `<div class="auth"><section class="card stack"><h2>Accès suspendu</h2><p class="muted" style="margin:0">Votre fiche de membre est désactivée. Contactez le bureau de l’association.</p><a class="btn primary" href="#/bienvenue">Mes associations</a></section></div>`;
+      return;
+    }
+    const a = S.ctx.assoc, base = '#/a/' + a.id;
+    const key = sub[0] || 'home';
+    const grp = NAV.find(n => n.keys.includes(key)) || null;
+    const tab = grp ? grp.tab : '__';
+    const cta = ctaFor(key, sub);
+    const place = [a.village, a.region, a.origin_country].filter(Boolean).join(' · ');
+    const sideGrp = n => `<div class="side-grp">${SUBS(n.tab).map(x => `<a href="${base}/${x.href}" ${subOn(x, key, q) ? 'aria-current="page"' : ''}>${x.label}${x.n ? `<span class="pill p-late num">${x.n}</span>` : ''}</a>`).join('')}</div>`;
+    const more = [['parametres', 'Paramètres', I.gear]].concat(canManageSub() ? [['abonnement', 'Abonnement', I.wallet]] : []).concat([['plus', 'Mon profil', I.user]]);
+    root.innerHTML = `<div id="app"${cta ? ' class="has-cta"' : ''}>
+      <header class="top"><a class="org" href="${base}">${LOGO}<div style="min-width:0"><b>${esc(a.name)}</b><small>${esc(place)}</small></div></a><span class="spacer"></span>${topAction()}
+        <a class="iconbtn" href="${base}/notifications" aria-label="Notifications${S.ctx.notif ? ' : ' + S.ctx.notif + ' nouvelle' + (S.ctx.notif > 1 ? 's' : '') : ''}">${I.bell}${S.ctx.notif ? `<span class="badge-dot num">${S.ctx.notif > 9 ? '9+' : S.ctx.notif}</span>` : ''}</a>
+        <a class="iconbtn" href="${base}/plus" aria-label="Mon profil">${I.user}</a></header>
+      <main id="view"><div class="loading">Chargement…</div></main>
+      ${cta ? `<div class="cta-bar"><div class="in">${cta}</div></div>` : ''}
+      <nav class="tabs" aria-label="Navigation principale"><div class="tabs-in"><a class="side-brand" href="#/bienvenue">${LOGO}<span><b>${esc(a.name)}</b><small>${esc(place)}</small></span></a>${NAV.map(n => `<a class="tab" href="${base}${n.tab ? '/' + n.tab : ''}" ${tab === n.tab ? 'aria-current="page"' : ''}><span class="ic">${n.icon}</span>${n.label}</a>${tab === n.tab && n.tab ? sideGrp(n) : ''}`).join('')}
+        <div class="side-more">${more.map(([k, l, ic]) => `<a href="${base}/${k}" ${key === k || (k === 'plus' && ['plus', 'notifications'].includes(key)) ? 'aria-current="page"' : ''}>${ic}${l}</a>`).join('')}</div></div></nav></div>`;
+    const view = Object.prototype.hasOwnProperty.call(V, key) ? V[key] : V.notfound;
+    const html = await view(sub, q);
+    const main = $('#view');
+    if (!main) return;
+    main.innerHTML = (key === 'abonnement' ? '' : subBanner()) + hubTop(grp, key, sub, q) + html;
+    if (Object.prototype.hasOwnProperty.call(AFTER, key)) AFTER[key](sub, q);
+    window.scrollTo(0, 0);
+  }
+
+  const B = () => '#/a/' + S.ctx.assoc.id;
+  function subBanner() {
+    const a = S.ctx.assoc, st = subStatus(a), go = canManageSub() && !IS_TWA ? `<a class="btn primary sm" href="${B()}/abonnement">${st === 'active' ? 'Renouveler' : 'Activer l’abonnement'}</a>` : '';
+    const end = [a.paid_until, a.trial_ends].filter(Boolean).sort().pop();
+    if (st === 'blocked') return `<section class="card stack sub-banner sub-bad"><b>Association suspendue par VillageLink.</b><span>Motif : ${esc(a.blocked_reason || 'non précisé')}. Tout reste consultable, mais on ne peut plus rien enregistrer. Écrivez à contact@villagelinkafrica.com.</span></section>`;
+    if (st === 'readonly') return `<section class="card stack sub-banner sub-bad"><b>L’essai gratuit est terminé : l’association est en lecture seule.</b><span>Tout reste consultable (caisse, historique, membres), mais on ne peut plus rien enregistrer.${canManageSub() ? '' : ' Prévenez le président.'}</span>${go}</section>`;
+    if (st === 'grace') return `<section class="card stack sub-banner sub-warn"><b>${a.paid_until ? 'L’abonnement' : 'L’essai gratuit'} s’est terminé le ${dFR(end)}.</b><span>Plus que ${Math.max(daysUntil(plusDays(end, 7)), 0)} jour(s) avant le passage en lecture seule.</span>${go}</section>`;
+    if (st === 'trial' && canManageSub() && a.trial_ends && daysUntil(a.trial_ends) <= 15) return `<section class="card stack sub-banner sub-info"><b>Essai gratuit : plus que ${daysUntil(a.trial_ends)} jour(s).</b><span>Il se termine le ${dFR(a.trial_ends)}. Choisissez une formule pour continuer sans interruption.</span>${go}</section>`;
+    if (st === 'active' && canManageSub() && daysUntil(a.paid_until) <= 10) return `<section class="card stack sub-banner sub-warn"><b>L’abonnement se termine le ${dFR(a.paid_until)}.</b>${go}</section>`;
+    return '';
+  }
+  const effect = t => (t.kind === 'in' ? 1 : -1) * Number(t.amount);
+  const subHead = (t, back) => `<div class="subhead"><a class="iconbtn" href="${back || B()}" aria-label="Retour">${I.back}</a><h1>${t}</h1></div>`;
+  const pct = (a, b) => (b > 0 ? Math.max(0, Math.min(100, Math.round(a / b * 100))) : 0);
+  const txItem = (t, reversedIds) => {
+    const reversed = reversedIds && reversedIds.has(t.id);
+    const title = t.category === 'Cotisations' && t.member_id ? 'Cotisation · ' + memberName(t.member_id) : t.description;
+    const fx = effect(t);
+    return `<a class="item" href="${B()}/op/${t.id}"><div class="body"><div class="t ${reversed ? 'strike' : ''}">${esc(title)}</div><div class="s wrap">${whenTx(t)} · ${esc(t.category)}${t.orig_currency ? ' · ' + origTag(t) : ''}${t.reversal_of ? ' · contre-écriture' : ''}${reversed ? ' · annulée' : ''}</div></div><span class="amt num ${fx >= 0 ? 'in' : 'out'}">${fx >= 0 ? '+' : '−'}${money(Math.abs(fx))}</span></a>`;
+  };
+  async function reversedSet(rows) {
+    const ids = rows.filter(t => !t.reversal_of).map(t => t.id);
+    if (!ids.length) return new Set();
+    const r = must(await sb.from('transactions').select('reversal_of').in('reversal_of', ids));
+    return new Set(r.map(x => x.reversal_of));
+  }
+  const logItem = l => `<div class="item"><div class="body"><div class="s wrap" style="color:var(--ink)"><b>${esc(l.actor_label)}</b> ${esc(l.message)}</div><div class="s">${dFR(l.created_at)}</div></div></div>`;
+  const opt = (v, l, sel) => `<option value="${esc(v)}" ${String(v) === String(sel) ? 'selected' : ''}>${esc(l)}</option>`;
+
+  /* ------------------------------------------------------------------
+     Écrans
+  ------------------------------------------------------------------ */
+  const V = {};
+  const AFTER = {};
+
+  V.notfound = async () => `${subHead('Page introuvable')}<p class="muted">Cette page n’existe pas.</p>`;
+
+  // Carte « Payer ma cotisation » (membre) et « Paiements à confirmer » (trésorier)
+  const payCard = () => {
+    if (isRO()) return '';
+    let out = '';
+    const n = claimsToConfirm().length;
+    if (n) out += `<a class="card between pay-cta" href="${B()}/cotisations?f=claims"><span><span class="eyebrow">À vérifier dans votre Wave ou Orange Money</span><br><b>${n} paiement${n > 1 ? 's' : ''} à confirmer</b></span><span class="pill p-late num">${n}</span></a>`;
+    const me = S.ctx.me;
+    if (me && hasFees() && feeOf(me) > 0 && mmAvail().length) {
+      const d = dues(me), cur = curYM(), due = d.remaining || (dueIn(me, cur) ? Math.max(feeOf(me) - paidFor(me.id, cur), 0) : 0);
+      const pend = (S.ctx.claims || []).some(c => c.member_id === me.id);
+      if (due > 0 || pend) out += `<a class="card between pay-cta gold" href="${B()}/payer"><span><span class="eyebrow">${pend ? 'Paiement en attente de confirmation' : d.isLate ? d.late.length + ' mois en retard' : 'Cotisation de ' + esc(pFR(cur))}</span><br><b class="num">${pend && !due ? 'Voir mon paiement' : 'Payer ' + money(due)}</b><br><span class="muted" style="font-size:12.5px">${mmAvail().map(([l]) => l).join(' · ')}</span></span><span class="q-ico">${I.wallet}</span></a>`;
+    }
+    return out;
+  };
+
+  V.home = async () => {
+    const a = S.ctx.assoc, me = S.ctx.me, cur = curYM(), fee = hasFees() ? 1 : 0;
+    const pres = ['president', 'vice_president'].includes(me.role), trea = !pres && canCollectAny();
+    const noErr = r => (r.error ? [] : r.data || []);
+    const openPolls = await sb.from('polls').select('*').eq('association_id', a.id).eq('status', 'Ouvert').order('created_at', { ascending: false }).limit(5).then(noErr, () => []);
+    const myVotes = openPolls.length && S.ctx.me ? await sb.from('poll_votes').select('poll_id').eq('member_id', S.ctx.me.id).then(noErr, () => []) : [];
+    const toVote = openPolls.filter(p => pollOpen(p) && !myVotes.some(v => v.poll_id === p.id));
+    const nextMeet = await sb.from('meetings').select('*').eq('association_id', a.id).eq('status', 'Prévue').gte('starts_at', new Date(Date.now() - 6 * 3600e3).toISOString()).order('starts_at', { ascending: true }).limit(1).then(noErr, () => []);
+    const [lastOps, projects, logs] = await Promise.all([
+      sb.from('transactions').select('*').eq('association_id', a.id).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(5).then(must),
+      sb.from('projects').select('*').eq('association_id', a.id).eq('status', 'En cours').order('created_at', { ascending: false }).limit(1).then(must),
+      sb.from('activity_log').select('*').eq('association_id', a.id).order('id', { ascending: false }).limit(5).then(must)
+    ]);
+    const lastRev = await reversedSet(lastOps);
+    const since = addMonth(curYM(), -5) + '-01';
+    const recentTx = await sb.from('transactions').select('kind,amount,occurred_on').eq('association_id', a.id).gte('occurred_on', since).then(noErr, () => []);
+    const catTot = pres ? await sb.from('v_category_totals').select('*').eq('association_id', a.id).then(noErr, () => []) : [];
+    const openCols = await sb.from('collections').select('*').eq('association_id', a.id).eq('status', 'Ouverte').order('created_at', { ascending: false }).limit(3).then(noErr, () => []);
+    const colTot = openCols.length ? await colTotals(openCols.map(c => c.id)) : new Map();
+    let projCard = '';
+    if (projects.length) {
+      const p = projects[0];
+      const t = must(await sb.from('v_project_totals').select('*').eq('project_id', p.id).maybeSingle()) || { collected: 0, spent: 0 };
+      const c = Number(t.collected), pc = pct(c, p.goal);
+      projCard = `<a class="card stack" href="${B()}/p/${p.id}"><div class="between"><span class="eyebrow">Projet en cours</span><span class="pill p-blue">${esc(p.status)}</span></div><h2>${esc(p.name)}</h2>
+        <div class="between"><span class="pct num">${pc}${NB}%</span><span class="muted num" style="font-size:14px">objectif ${money(p.goal)}</span></div><div class="bar"><i style="width:${pc}%"></i></div>
+        <div class="proj-num num"><div><small>Collecté</small><b>${moneyW(c)}</b></div><div><small>Dépensé</small><b>${moneyW(t.spent)}</b></div><div><small>Reste</small><b>${moneyW(Math.max(0, p.goal - c))}</b></div></div></a>`;
+    } else if (can('projects')) {
+      projCard = `<a class="card stack" href="${B()}/projets/nouveau"><span class="eyebrow">Projets</span><h2>Créer le premier projet du village</h2><span class="muted">Forage, école, mosquée… Chaque projet affiche sa barre de progression.</span></a>`;
+    }
+    const act = activeMembers(), late = lateMembers().length;
+    const dueNow = act.filter(m => dueIn(m, cur));
+    const collected = dueNow.reduce((s, m) => s + Math.min(paidFor(m.id, cur), feeOf(m)), 0), expected = dueNow.reduce((s, m) => s + feeOf(m), 0);
+    const paidCount = dueNow.filter(m => paidFor(m.id, cur) >= feeOf(m)).length;
+    const bal = S.ctx.bal, solde = bal.in - bal.out, CURL = esc(CUR_LABEL[a.currency] || 'FCFA');
+    const inMonth = recentTx.filter(t => t.kind === 'in' && ym(t.occurred_on) === cur).reduce((x, t) => x + Number(t.amount), 0);
+    const outMonth = recentTx.filter(t => t.kind === 'out' && ym(t.occurred_on) === cur).reduce((x, t) => x + Number(t.amount), 0);
+    const late3 = lateMembers().sort((x, y) => dues(y).remaining - dues(x).remaining).slice(0, 3);
+    const first = String(me.full_name || '').split(/\s+/)[0];
+    const monthName = pFR(cur).replace(/^./, c => c.toUpperCase());
+
+    const greet = `<div class="greet"><h1>Bonjour ${esc(first)}</h1><p>${esc(ROLES[me.role])} · ${dFR(todayISO())}</p></div>`;
+    const todo = (href, ico, t, s, warn) => `<a class="todo${warn ? ' warn' : ''}" href="${href}"><span class="ico-tile">${ico}</span><span class="body" style="flex:1;min-width:0"><span class="tt" style="display:block">${t}</span><span class="ss" style="display:block">${s}</span></span><span class="chev">${I.chev}</span></a>`;
+    // Ma cotisation (chacun voit d'abord SA situation)
+    let status = '';
+    if (hasFees() && feeOf(me) > 0 && !exemptOf(me, cur)) {
+      const d = dues(me), due = d.remaining, pend = (S.ctx.claims || []).some(c => c.member_id === me.id), canPay = mmAvail().length && !isRO();
+      if (due > 0 || pend) {
+        status = `<section class="card status-card${d.isLate ? ' late' : ''}"><div class="between"><span class="eyebrow">Ma cotisation · ${esc(monthName)}</span>${pend && !due ? '<span class="pill p-late">En attente de confirmation</span>' : d.isLate ? '<span class="pill p-late">En retard</span>' : '<span class="pill p-blue">À payer</span>'}</div>
+          ${pend && !due ? '<div class="big" style="font-size:26px">Paiement déclaré</div><span class="muted">Le trésorier va le confirmer.</span>'
+            : `<div><div class="muted" style="font-size:15px">Vous devez</div><div class="big num">${num(due)}<small>${CURL}</small></div><div class="muted" style="font-size:15px;margin-top:4px">${d.isLate ? d.late.length + ' mois en retard' : 'à payer avant le ' + dFR(cur + '-' + pad(a.fee_due_day))}</div></div>`}
+          ${canPay ? `<a class="btn primary block" href="${B()}/payer">${I.wallet} ${pend && !due ? 'Voir mon paiement' : 'Payer ma cotisation'}</a>` : (due > 0 ? '<span class="help">Remettez votre cotisation au trésorier.</span>' : '')}</section>`;
+      } else if (!pres && !trea) {
+        status = `<section class="card status-card ok"><div class="between"><span class="eyebrow">Ma cotisation · ${esc(monthName)}</span><span class="pill p-ok">À jour</span></div><div class="big" style="font-size:28px">Vous êtes à jour</div><span class="muted">Merci ! Votre cotisation est payée.</span></section>`;
+      }
+    }
+    const nClaims = isRO() ? 0 : claimsToConfirm().length;
+    const todos = [
+      nClaims ? todo(`${B()}/cotisations?f=claims`, I.clock, `${nClaims} paiement${nClaims > 1 ? 's' : ''} à confirmer`, 'Vérifiez dans votre Wave ou Orange Money.', true) : '',
+      S.ctx.expPending && can('approve') ? todo(`${B()}/depenses`, I.out, `${S.ctx.expPending} dépense${S.ctx.expPending > 1 ? 's' : ''} à valider`, 'Le trésorier attend votre accord avant de sortir l’argent.', true) : '',
+      pendingMembers().length && can('members') ? todo(`${B()}/membres?f=pending`, I.users, `${pendingMembers().length} demande${pendingMembers().length > 1 ? 's' : ''} d’adhésion`, 'Vérifiez que ce sont bien des ressortissants du village.', true) : '',
+      fee && late && (pres || trea) ? todo(`${B()}/cotisations?f=late`, I.users, `${late} membre${late > 1 ? 's n’ont' : ' n’a'} pas payé`, `Cotisation de ${esc(pFR(cur))}`, false) : '',
+      act.length <= 1 && can('members') ? todo(`${B()}/membres/import`, I.list, 'Ajoutez la liste des membres', 'Collez-la depuis votre cahier, Excel ou WhatsApp.', false) : ''
+    ].join('');
+    const monthCard = fee && (pres || trea) && dueNow.length ? `<section class="card stack"><div class="between"><span class="eyebrow">${esc(monthName)}</span><b class="num">${paidCount} sur ${dueNow.length} ont payé</b></div><div class="bar"><i style="width:${pct(collected, expected)}%"></i></div><span class="muted num" style="font-size:14px">${money(collected)} sur ${money(expected)} collectés</span></section>` : '';
+    const presCash = `<section class="card hero"><span class="eyebrow">Dans la caisse</span><div class="big num">${num(solde)} <span class="cur">${CURL}</span></div>
+      <div class="boxes num"><div><small>Entrées ce mois</small><b>+ ${money(inMonth)}</b></div><div><small>Sorties ce mois</small><b>− ${money(outMonth)}</b></div></div>
+      <div class="foot"><span>${act.length} membre${act.length > 1 ? 's' : ''} · vérifiable par tous</span><a href="${B()}/transparence">Où va l’argent</a></div></section>`;
+    const cash = `<section class="card stack"><span class="eyebrow">Dans la caisse de l’association</span><div class="status-card"><div class="big num">${num(solde)}<small>${CURL}</small></div></div><a class="link" href="${B()}/transparence">Voir où va l’argent ${I.chev}</a></section>`;
+    const outs = catTot.filter(c => c.kind === 'out' && Number(c.total) > 0).sort((x, y) => y.total - x.total).slice(0, 4), maxOut = outs[0] ? Number(outs[0].total) : 0;
+    const where = outs.length ? `<section class="card stack"><div class="between"><h2>Où va l’argent</h2><a class="link" href="${B()}/transparence">Détail</a></div><div class="cat-list">${outs.map(c => `<div><div class="l"><span>${esc(c.category)}</span><b class="num">${money(c.total)}</b></div><div class="bar"><i style="width:${pct(c.total, maxOut)}%"></i></div></div>`).join('')}</div></section>` : '';
+    const outIco = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>';
+    const shortcuts = `<nav class="shortcuts" aria-label="Raccourcis"><a class="shortcut" href="${B()}/cotisations?f=late">${I.chat}Relancer</a>${can('spend') ? `<a class="shortcut" href="${B()}/operation?type=out">${outIco}Dépense</a>` : `<a class="shortcut" href="${B()}/finances">${I.list}Mouvements</a>`}<a class="shortcut" href="${B()}/rapport">${I.report}Rapport</a></nav>`;
+    const lateCard = fee && late3.length && (pres || trea) ? `<section class="card stack"><div class="between"><h2>Qui n’a pas payé</h2><a class="link" href="${B()}/cotisations?f=late">Tout voir</a></div><div class="list flat">${late3.map(m => { const d = dues(m); return `<div class="item"><div class="av">${esc(initials(m.full_name))}</div><div class="body"><a class="t" href="${B()}/m/${m.id}" style="display:block;text-decoration:none">${esc(m.full_name)}</a><div class="s wrap num">${catOf(m) ? esc(catOf(m).name) + ' · ' : ''}${d.late.length} mois de retard · ${money(d.remaining)}</div></div><a class="btn relance" target="_blank" rel="noopener" href="${waTo(m.phone, relanceText(m, d))}">Relancer</a></div>`; }).join('')}</div></section>` : '';
+    const opsCard = `<section class="card stack"><div class="between"><h2>Derniers mouvements</h2><a class="link" href="${B()}/finances">Tout voir</a></div><div class="list flat" id="home-ops">${lastOps.map(t => txItem(t, lastRev)).join('') || '<div class="empty">Aucune opération pour le moment. Elles s’afficheront ici avec leur date et leur heure.</div>'}</div></section>`;
+    const actCard = `<section class="card stack"><div class="between"><h2>Activité récente</h2><a class="link" href="${B()}/journal">Tout voir</a></div><div class="list flat">${logs.map(logItem).join('') || '<div class="empty">Aucune activité pour le moment.</div>'}</div></section>`;
+    const pollCard = toVote.length && S.ctx.me.user_id ? `<a class="card poll-next" href="${B()}/vote/${toVote[0].id}"><span class="ico">${I.vote}</span><span class="body"><span class="eyebrow">Vote en cours${toVote.length > 1 ? ' · ' + toVote.length + ' votes' : ''}</span><b>${esc(toVote[0].question)}</b><span class="muted">Donnez votre avis</span></span><span class="chev">${I.chev}</span></a>` : '';
+    const meetCard = nextMeet.length ? `<a class="card meet-next" href="${B()}/r/${nextMeet[0].id}">${dateBox(nextMeet[0].starts_at)}<span class="body"><span class="eyebrow">Prochaine réunion</span><b>${esc(nextMeet[0].title)}</b><span class="muted">${esc(hm(nextMeet[0].starts_at))}${nextMeet[0].place ? ' · ' + esc(nextMeet[0].place) : ''}</span></span><span class="chev">${I.chev}</span></a>` : '';
+    const colCards = openCols.map(c => colCard(c, colTot.get(c.id), true)).join('');
+    let L, R;
+    if (pres) { L = [greet, presCash, status, todos, where, monthCard]; R = [projCard, pollCard, meetCard, colCards, opsCard, actCard]; }
+    else if (trea) { L = [greet, status, todos, monthCard, shortcuts, pollCard, meetCard, colCards]; R = [cash, lateCard, opsCard, projCard, actCard]; }
+    else { L = [greet, status, todos, cash, pollCard, meetCard, colCards, projCard]; R = [opsCard, actCard]; }
+    return `<div class="home-grid"><div class="home-l">${L.join('')}</div><div class="home-r">${R.join('')}</div></div>`;
+  };
+
+  // Vie de l'association : le point d'entrée des annonces, de la discussion, des réunions, des votes et des documents
+  V.vie = async () => {
+    const unseen = S.ctx.lastMsg > Number(store.get('vl:seen:' + S.ctx.assoc.id) || 0);
+    const rows = [['annonces', 'Annonces', 'Nouvelles du village', I.mega, ''], ['discussion', 'Discussion', 'Messages, idées et réclamations des membres', I.chat.replace('width="24" height="24" ', ''), unseen ? '<span class="pill p-blue">Nouveau</span>' : ''], ['reunions', 'Réunions', 'Convocations, présence et comptes rendus', I.cal, ''], ['votes', 'Votes', 'Décisions et sondages de l’association', I.vote, ''], ['documents', 'Documents', 'Statuts, règlement, procès-verbaux', I.doc, '']];
+    return `<h1>Vie de l’association</h1><div class="stack">${rows.map(([k, t, sx, ic, bd]) => `<a class="todo" href="${B()}/${k}"><span class="ico-tile">${ic}</span><span class="body" style="flex:1;min-width:0"><span class="tt" style="display:block">${t}</span><span class="ss" style="display:block">${sx}</span></span>${bd}<span class="chev">${I.chev}</span></a>`).join('')}</div>`;
+  };
+  V.caisse = (sub, q) => V.finances(sub, q);
+
+  /* Membres ---------------------------------------------------------- */
+  V.membres = async (sub, q) => {
+    if (sub[1] === 'nouveau') return memberForm(null);
+    if (sub[1] === 'import') return importView();
+    const f = q.get('f') || 'all';
+    const late = lateMembers().length, noApp = activeMembers().filter(m => !m.user_id).length, inactive = S.ctx.members.filter(m => !m.active && !m.pending).length;
+    const chips = [['all', 'Tous (' + activeMembers().length + ')'], ['bureau', 'Bureau'], ['late', 'En retard (' + late + ')'], ['noapp', 'Sans application (' + noApp + ')']];
+    (S.ctx.cats || []).forEach(c => chips.push(['c:' + c.id, c.name + ' (' + activeMembers().filter(m => m.category_id === c.id).length + ')']));
+    (S.ctx.sections || []).forEach(x => chips.push(['s:' + x.id, x.name + ' (' + activeMembers().filter(m => m.section_id === x.id).length + ')']));
+    if (inactive) chips.push(['inactive', 'Retirés (' + inactive + ')']);
+    if (pendingMembers().length) chips.unshift(['pending', 'Demandes (' + pendingMembers().length + ')']);
+    return `<div class="between"><h2>Liste des membres</h2>${can('members') ? `<a class="btn primary sm" href="${B()}/membres/nouveau">+ Ajouter</a>` : ''}</div>
+      <input class="search" id="msearch" type="search" placeholder="Rechercher un nom, une ville ou un numéro" aria-label="Rechercher un membre">
+      <div class="chips" role="group" aria-label="Filtrer">${chips.map(([k, l]) => `<a class="chip" href="${B()}/membres?f=${k}" aria-pressed="${f === k}" style="text-decoration:none">${l}</a>`).join('')}</div>
+      <div class="list" id="mlist"></div>
+      ${can('members') ? `<a class="link" href="${B()}/membres/import">Importer une liste de membres</a>` : ''}
+      <p class="note">Un membre n’a pas besoin de smartphone : le trésorier enregistre ses paiements et lui envoie le reçu par WhatsApp.</p>`;
+  };
+  AFTER.membres = (sub, q) => {
+    if (sub[1]) { if (sub[1] === 'import') afterImport(); return; }
+    const f = q.get('f') || 'all';
+    const input = $('#msearch');
+    const draw = () => {
+      const s = input.value.trim().toLowerCase();
+      let l = S.ctx.members.filter(m => f === 'pending' ? m.pending : f === 'inactive' ? (!m.active && !m.pending) : (m.active && !m.pending));
+      if (f === 'bureau') l = l.filter(m => m.role !== 'membre');
+      if (f === 'late') l = l.filter(m => dues(m).isLate);
+      if (f === 'noapp') l = l.filter(m => !m.user_id);
+      if (f.startsWith('s:')) l = l.filter(m => m.section_id === f.slice(2));
+      if (f.startsWith('c:')) l = l.filter(m => m.category_id === f.slice(2));
+      if (s) l = l.filter(m => (m.full_name + ' ' + m.city + ' ' + m.phone).toLowerCase().includes(s));
+      l.sort((x, y) => (x.role === 'membre') - (y.role === 'membre') || x.full_name.localeCompare(y.full_name, 'fr'));
+      if (f === 'pending') {
+        $('#mlist').innerHTML = l.map(m => `<div class="item"><div class="av">${esc(initials(m.full_name))}</div><div class="body"><div class="t">${esc(m.full_name)}</div><div class="s">${esc(m.phone || 'Sans numéro')} · demande du ${dFR(m.created_at)}</div>${can('members') ? `<div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="btn primary sm" data-act="review" data-id="${m.id}" data-ok="1">Valider</button><button class="btn danger sm" data-act="review" data-id="${m.id}" data-ok="0">Refuser</button></div>` : ''}</div></div>`).join('') || '<div class="empty">Aucune demande en attente.</div>';
+        return;
+      }
+      $('#mlist').innerHTML = l.slice(0, 400).map(m => `<a class="item" href="${B()}/m/${m.id}"><div class="av">${esc(initials(m.full_name))}</div><div class="body"><div class="t">${esc(m.full_name)}</div><div class="s">${m.role !== 'membre' ? esc(ROLES[m.role]) + ' · ' : ''}${catOf(m) ? esc(catOf(m).name) + ' · ' : ''}${m.section_id ? esc(secName(m.section_id)) + ' · ' : ''}${esc(m.city || m.phone || '—')}${m.user_id ? '' : ' · sans application'}</div></div>${statusPill(m)}</a>`).join('') || '<div class="empty">Aucun membre ne correspond.</div>';
+    };
+    input.addEventListener('input', draw); draw();
+  };
+
+  V.m = async (sub) => {
+    const m = S.ctx.byId.get(sub[1]);
+    if (!m) return `${subHead('Membre introuvable', B() + '/membres')}`;
+    if (sub[2] === 'modifier') return memberForm(m);
+    const d = dues(m), fee = feeOf(m);
+    const hist = must(await sb.from('transactions').select('*').eq('association_id', S.ctx.assoc.id).eq('member_id', m.id).order('occurred_on', { ascending: false }).order('id', { ascending: false }).limit(60));
+    const rset = await reversedSet(hist);
+    const start = [ym(S.ctx.assoc.dues_start), ym(m.joined_on)].sort().pop(), cur = curYM();
+    const periods = fee && start <= cur ? monthsBetween(start, cur).reverse().slice(0, 12) : [];
+    const relance = relanceText(m, d);
+    return `${subHead('Fiche membre', B() + '/membres')}
+      <div class="row"><div class="av lg">${esc(initials(m.full_name))}</div><div style="min-width:0"><h2 style="font-size:20px">${esc(m.full_name)}</h2><div class="row" style="flex-wrap:wrap;gap:6px;margin-top:4px"><span class="pill p-blue">${esc(ROLES[m.role])}</span>${statusPill(m)}</div></div></div>
+      <section class="card"><dl class="kv num" style="margin:0"><dt>Téléphone</dt><dd>${esc(m.phone) || '<span class="muted">—</span>'}</dd><dt>Email</dt><dd>${esc(m.email) || '<span class="muted">—</span>'}</dd><dt>Résidence</dt><dd>${esc([m.city, m.country].filter(Boolean).join(', ')) || '<span class="muted">—</span>'}</dd>${m.section_id ? `<dt>Section</dt><dd>${esc(secName(m.section_id))}${(S.ctx.sections || []).some(x => x.treasurer_member_id === m.id) ? ' · trésorier de section' : ''}</dd>` : ''}${(S.ctx.cats || []).length ? `<dt>Catégorie</dt><dd>${catOf(m) ? esc(catOf(m).name) : 'Cotisation générale'}${hasFees() ? ' · ' + (fee ? money(fee) + ' par mois' : 'dispensé') : ''}</dd>` : ''}<dt>Adhésion</dt><dd>${dFR(m.joined_on)}</dd><dt>Application</dt><dd>${m.user_id ? 'Oui' : 'Non, suivi par le trésorier'}</dd></dl></section>
+      ${periods.length ? `<section class="card stack"><h2>Cotisations</h2>${periods.map(p => { const pd = paidFor(m.id, p); return `<div class="between num"><span>${pFR(p)}</span>${pd >= fee ? `<span class="pill p-ok">${money(pd)} payé</span>` : exemptOf(m, p) ? '<span class="pill p-blue">Dispensé</span>' : `<span class="pill ${d.late.includes(p) ? 'p-late' : 'p-blue'}">Reste ${money(fee - pd)}</span>`}</div>`; }).join('')}
+        ${d.remaining ? `<div class="between num" style="border-top:1px solid var(--line);padding-top:10px"><b>Total dû</b><b style="color:var(--warn)">${money(d.remaining)}</b></div>` : ''}</section>` : ''}
+      ${await exemptCard(m)}
+      <div class="stack">
+        ${canCollectFor(m) && m.active && !m.pending ? `<a class="btn primary block" href="${B()}/encaisser?m=${m.id}">Enregistrer un paiement</a>` : ''}
+        ${d.owed.length ? `<a class="btn wa block" target="_blank" rel="noopener" href="${waTo(m.phone, relance)}">${I.wa} Relancer sur WhatsApp</a>` : ''}
+        ${can('members') && (m.role === 'membre' || can('roles')) && !m.pending ? `<a class="btn ghost block" href="${B()}/m/${m.id}/modifier">Modifier la fiche</a>` : ''}
+        ${can('members') && (m.role === 'membre' || can('roles')) && !m.pending && m.id !== S.ctx.me.id ? (m.active
+          ? `<button class="btn danger block" data-act="memberactive" data-id="${m.id}" data-v="0">Retirer de l’association</button><p class="help">${esc(m.full_name)} n’aura plus accès à l’application et n’aura plus de cotisation due. Ses paiements restent dans l’historique, pour la transparence.</p>`
+          : `<button class="btn ghost block" data-act="memberactive" data-id="${m.id}" data-v="1">Réintégrer dans l’association</button>`) : ''}
+      </div>
+      ${hist.length ? `<section class="stack"><span class="eyebrow">Historique des paiements</span><div class="list">${hist.map(t => txItem(t, rset)).join('')}</div></section>` : ''}`;
+  };
+  AFTER.m = () => {};
+
+  // Dispense temporaire (sans travail, au village…) : le bureau l'accorde, tout le monde la voit, seul le bureau lit le motif.
+  const EX_REASONS = ['Sans travail', 'Sans travail, au village', 'Maladie', 'Études', 'Autre'];
+  async function exemptCard(m) {
+    if (!hasFees() || !feeOf(m) || m.pending) return '';
+    const mine = (S.ctx.exempts || []).filter(e => e.member_id === m.id).sort((x, y) => y.from_period.localeCompare(x.from_period));
+    const bureau = can('members');
+    let reasons = new Map();
+    if (bureau && mine.length) { const r = await sb.rpc('exemption_reasons', { p_assoc: S.ctx.assoc.id }); if (!r.error) reasons = new Map((r.data || []).map(x => [Number(x.id), x.reason])); }
+    const cur = curYM(), now = exemptOf(m, cur);
+    if (!mine.length && !bureau) return '';
+    const per = e => `${pFR(e.from_period)} → ${e.to_period ? pFR(e.to_period) : 'jusqu’à nouvel ordre'}`;
+    return `<section class="card stack" id="dispense"><div class="between"><h2>Dispense de cotisation</h2>${now ? '<span class="pill p-blue">Dispensé</span>' : ''}</div>
+      ${mine.length ? `<div class="stack">${mine.map(e => `<div class="between" style="align-items:flex-start;gap:10px"><span style="min-width:0"><b class="num">${per(e)}</b><br><span class="muted" style="font-size:12.5px">Accordée par ${esc(String(e.created_label).replace(/\s*\(.*\)$/, ''))}${reasons.get(Number(e.id)) ? ' · ' + esc(reasons.get(Number(e.id))) : ''}</span></span>
+        ${bureau && (!e.to_period || e.to_period >= cur) ? `<button class="btn ghost sm" data-act="ex-end" data-id="${e.id}" data-from="${esc(e.from_period)}">Il reprend</button>` : ''}</div>`).join('')}</div>` : ''}
+      ${bureau && !now ? `<details class="more"><summary>Dispenser ${esc(m.full_name.split(' ')[0])}</summary>
+        <form class="stack" data-form="exempt" data-id="${m.id}" novalidate style="margin-top:8px">
+          <p class="help" style="margin:0">Pendant la dispense, aucun mois n’est dû ni relancé. Avant et après, la cotisation reste due normalement.</p>
+          <div class="row2"><div class="field"><label for="ex-f">À partir de</label><input id="ex-f" name="from" type="month" value="${cur}"></div><div class="field"><label for="ex-t">Jusqu’à (facultatif)</label><input id="ex-t" name="to" type="month"></div></div>
+          <div class="field"><label for="ex-r">Motif (visible par le bureau seulement)</label><select id="ex-r" name="reason">${EX_REASONS.map(x => opt(x, x)).join('')}</select></div>
+          <p class="err" hidden></p><button class="btn primary block" type="submit">Accorder la dispense</button>
+          <p class="help" style="margin:0">Tous les membres verront que ${esc(m.full_name)} est dispensé, sans le motif.</p></form></details>` : ''}
+      <form class="stack" data-form="exend" id="exend" hidden novalidate><div class="field"><label for="ex-l">Dernier mois dispensé</label><input id="ex-l" name="last" type="month" value="${addMonth(cur, -1)}"><p class="help">Il cotise de nouveau à partir du mois suivant.</p></div><input type="hidden" name="id"><p class="err" hidden></p><button class="btn primary block" type="submit">Mettre fin à la dispense</button></form></section>`;
+  }
+
+  function relanceText(m, d) {
+    const a = S.ctx.assoc;
+    return `Bonjour ${m.full_name}, petit rappel de l’association « ${a.name} » : votre cotisation (${d.owed.map(pFR).join(', ')}) reste à régler, soit ${money(d.remaining)}. Merci de voir le trésorier. Merci pour le village !`;
+  }
+
+  function memberForm(m) {
+    const isNew = !m, r = m ? m.role : 'membre';
+    if (!can('members')) return `${subHead('Membre')}<p class="note">Seul le bureau peut ajouter ou modifier un membre.</p>`;
+    if (m && m.role !== 'membre' && !can('roles')) return `${subHead('Membre', B() + '/m/' + m.id)}<p class="note">Seul le président modifie la fiche d’un membre du bureau.</p>`;
+    return `${subHead(isNew ? 'Ajouter un membre' : 'Modifier la fiche', isNew ? B() + '/membres' : B() + '/m/' + m.id)}
+      <form class="stack" data-form="member" data-id="${m ? m.id : ''}" novalidate>
+        <div class="field"><label for="mb-name">Nom complet</label><input id="mb-name" name="full_name" value="${esc(m && m.full_name)}" autocomplete="off" required></div>
+        <div class="field"><label for="mb-phone">Téléphone</label><input id="mb-phone" name="phone" type="tel" inputmode="tel" value="${esc(m && m.phone)}" placeholder="+221 77 000 00 00"><p class="help">Avec l’indicatif (+221, +224, +33…) pour pouvoir relancer directement sur WhatsApp.</p></div>
+        <div class="row2"><div class="field"><label for="mb-city">Ville de résidence</label><input id="mb-city" name="city" value="${esc(m && m.city)}"></div><div class="field"><label for="mb-country">Pays</label><input id="mb-country" name="country" value="${esc(m ? m.country : S.ctx.assoc.residence_country)}"></div></div>
+        ${(S.ctx.cats || []).length ? `<div class="field"><label for="mb-cat">Catégorie</label><select id="mb-cat" name="category_id"><option value="">Cotisation générale (${money(S.ctx.assoc.fee_amount)})</option>${S.ctx.cats.map(c => opt(c.id, c.name + ' (' + (Number(c.fee_amount) ? money(c.fee_amount) : 'dispensé') + ')', m ? m.category_id : '')).join('')}</select></div>` : ''}
+        ${(S.ctx.sections || []).length ? `<div class="field"><label for="mb-sec">Section</label><select id="mb-sec" name="section_id"><option value="">Aucune section</option>${S.ctx.sections.map(x => opt(x.id, x.name, m ? m.section_id : '')).join('')}</select></div>` : ''}
+        <div class="field"><label for="mb-email">Email (facultatif)</label><input id="mb-email" name="email" type="email" value="${esc(m && m.email)}"></div>
+        <div class="field"><label for="mb-joined">Date d’adhésion</label><input id="mb-joined" name="joined_on" type="date" value="${esc(m ? m.joined_on : todayISO())}"><p class="help">Les cotisations sont dues à partir de ce mois.</p></div>
+        ${can('roles') ? `<div class="field"><label for="mb-role">Fonction dans l’association</label><select id="mb-role" name="role">${Object.entries(ROLES).map(([k, l]) => opt(k, l, r)).join('')}</select></div>` : ''}
+        ${!isNew ? `<div class="field"><label class="check"><input type="checkbox" name="active" ${m.active ? 'checked' : ''}> Membre actif</label><p class="help">Décocher revient à retirer le membre de l’association : il perd l’accès et n’a plus de cotisation due. Son historique est conservé.</p></div>` : ''}
+        <p class="err" hidden></p><button class="btn primary block" type="submit">${isNew ? 'Ajouter' : 'Enregistrer'}</button></form>`;
+  }
+
+  function importView() {
+    if (!can('members')) return `${subHead('Importer', B() + '/membres')}<p class="note">Réservé au bureau.</p>`;
+    return `${subHead('Importer des membres', B() + '/membres')}
+      <p class="muted" style="margin:0">Collez une ligne par membre : <b>nom</b>, puis <b>téléphone</b>, puis <b>ville</b>. Les colonnes peuvent être séparées par une tabulation (copier depuis Excel ou Google Sheets), un point-virgule ou une virgule.</p>
+      <form class="stack" data-form="import" novalidate>
+        <div class="field"><label for="im-text">Liste des membres</label><textarea id="im-text" name="text" class="mono" rows="10" placeholder="Mamadou Diallo; +221 77 123 45 67; Pikine&#10;Fatoumata Bah; +221 76 234 56 78; Dakar"></textarea></div>
+        <div class="field"><label for="im-file">Ou choisir un fichier CSV</label><input id="im-file" type="file" accept=".csv,.txt,text/csv,text/plain"></div>
+        <div class="field"><label for="im-joined">Date d’adhésion pour tous</label><input id="im-joined" name="joined_on" type="date" value="${todayISO()}"></div>
+        <p class="ok-msg" id="im-preview"></p>
+        <p class="err" hidden></p><button class="btn primary block" type="submit">Importer</button></form>`;
+  }
+  function parseImport(text) {
+    const rows = [];
+    String(text || '').split(/\r?\n/).forEach(line => {
+      if (!line.trim()) return;
+      const sep = line.includes('\t') ? '\t' : line.includes(';') ? ';' : ',';
+      const c = line.split(sep).map(x => x.trim().replace(/^"|"$/g, ''));
+      if (/^(nom|name|prénom)/i.test(c[0])) return;
+      if (c[0] && c[0].length >= 2) rows.push({ full_name: c[0].slice(0, 120), phone: (c[1] || '').slice(0, 40), city: (c[2] || '').slice(0, 80) });
+    });
+    return rows;
+  }
+  function afterImport() {
+    const ta = $('#im-text'), prev = $('#im-preview'), file = $('#im-file');
+    if (!ta || !prev || !file) return;   // formulaire absent (accès réservé au bureau)
+    const upd = () => { const n = parseImport(ta.value).length; prev.textContent = n ? `${n} membre${n > 1 ? 's' : ''} prêt${n > 1 ? 's' : ''} à importer.` : ''; };
+    ta.addEventListener('input', upd);
+    file.addEventListener('change', () => { const f = file.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { ta.value = r.result; upd(); }; r.readAsText(f); });
+  }
+
+  /* Cotisations ------------------------------------------------------ */
+  V.cotisations = async (sub, q) => {
+    const a = S.ctx.assoc, fee = Number(a.fee_amount) || 0, cur = curYM(), cats = S.ctx.cats || [];
+    if (!hasFees()) return `<h1>Cotisations</h1><section class="card stack"><h2>Aucune cotisation définie</h2><p class="muted" style="margin:0">Fixez le montant mensuel et le jour d’échéance pour suivre qui est à jour.</p>${can('settings') ? `<a class="btn primary" href="${B()}/parametres">Définir la cotisation</a>` : '<p class="help">Seul le président peut la définir.</p>'}</section>`;
+    const toConf = claimsToConfirm();
+    const f = q.get('f') || (toConf.length ? 'claims' : 'late');
+    const late = lateMembers().sort((x, y) => dues(y).remaining - dues(x).remaining || x.full_name.localeCompare(y.full_name, 'fr'));
+    const dueNow = activeMembers().filter(m => dueIn(m, cur));
+    const collected = dueNow.reduce((s, m) => s + Math.min(paidFor(m.id, cur), feeOf(m)), 0), expected = dueNow.reduce((s, m) => s + feeOf(m), 0);
+    const paidCount = dueNow.filter(m => paidFor(m.id, cur) >= feeOf(m)).length;
+    let list = '';
+    if (f === 'claims') {
+      list = `<p class="note" style="margin:0"><b>Avant de confirmer</b>, ouvrez VOTRE application Wave, Orange Money ou Free Money et vérifiez que l’argent est bien arrivé. Ne vous fiez jamais à un SMS ni à une capture d’écran. Wave permet d’annuler un envoi pendant une heure : pour un paiement Wave très récent, attendez une heure avant de confirmer.</p>
+        <div class="list">${toConf.map(c => { const m = S.ctx.byId.get(c.member_id) || { full_name: '?' }; return `<div class="item" style="flex-wrap:wrap"><div class="av">${esc(initials(m.full_name))}</div><div class="body"><div class="t">${esc(m.full_name)}</div><div class="s wrap num"><b style="color:var(--ink)">${money(c.amount)}</b> par ${esc(c.method)} · ${esc(pFR(c.period))}<br>Envoyé au ${esc(c.sent_to)} · déclaré le ${dFR(localDay(c.created_at))} à ${hm(c.created_at)}${c.reference ? '<br>Réf. ' + esc(c.reference) : '<br>Sans référence'}</div>
+          <div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="btn primary sm" data-act="claim-ok" data-id="${c.id}">Confirmer la réception</button><button class="btn ghost sm" data-act="claim-no" data-id="${c.id}">Refuser</button></div>
+          <form class="stack" data-form="rejectclaim" data-id="${c.id}" id="rjc-${c.id}" hidden style="margin-top:8px" novalidate><div class="field"><label for="rjc-r-${c.id}">Motif du refus</label><input id="rjc-r-${c.id}" name="reason" placeholder="Ex. rien reçu sur Wave"></div><p class="err" hidden></p><button class="btn danger sm" type="submit">Refuser ce paiement</button></form></div></div>`; }).join('') || '<div class="empty">Aucun paiement à confirmer.</div>'}</div>`;
+    } else if (f === 'late') {
+      const row = (m, ps) => { const d = dues(m); return `<div class="item"><div class="av">${esc(initials(m.full_name))}</div><div class="body"><a class="t" href="${B()}/m/${m.id}" style="display:block;text-decoration:none">${esc(m.full_name)}</a><div class="s wrap num">${ps(d).map(pFR).join(', ')} · reste ${money(d.remaining)}</div><div class="row" style="margin-top:8px;flex-wrap:wrap">${canCollectFor(m) ? `<a class="btn primary sm" href="${B()}/encaisser?m=${m.id}">Encaisser</a>` : ''}<a class="btn wa sm" target="_blank" rel="noopener" href="${waTo(m.phone, relanceText(m, d))}">${I.wa} Relancer</a></div></div></div>`; };
+      const unpaid = late.length ? [] : activeMembers().filter(m => dues(m).remaining > 0);
+      list = late.length ? `<div class="list">${late.map(m => row(m, d => d.late)).join('')}</div>`
+        : unpaid.length ? `<p class="note" style="margin:0">Personne n’est en retard. ${unpaid.length > 1 ? unpaid.length + ' membres n’ont' : '1 membre n’a'} pas encore payé :</p><div class="list">${unpaid.map(m => row(m, d => d.owed)).join('')}</div>`
+        : '<div class="list"><div class="empty">Tout le monde est à jour.</div></div>';
+    } else {
+      const recent = must(await sb.from('transactions').select('*').eq('association_id', a.id).eq('category', 'Cotisations').order('id', { ascending: false }).limit(40));
+      const rset = await reversedSet(recent);
+      list = `<div class="list">${recent.map(t => txItem(t, rset)).join('') || '<div class="empty">Aucun paiement enregistré.</div>'}</div>`;
+    }
+    const secs = S.ctx.sections || [];
+    const secRows = secs.map(x => { const ms = dueNow.filter(m => m.section_id === x.id); return { x, n: ms.length, paid: ms.filter(m => paidFor(m.id, cur) >= feeOf(m)).length, got: ms.reduce((t, m) => t + Math.min(paidFor(m.id, cur), feeOf(m)), 0), late: ms.filter(m => dues(m).isLate).length }; });
+    const noSec = dueNow.filter(m => !m.section_id);
+    const secCard = secs.length ? `<section class="card stack"><div class="between"><h2>Par section</h2><a class="link" href="${B()}/sections">Gérer</a></div>${secRows.map(r => `<a class="between num" href="${B()}/membres?f=s:${r.x.id}" style="text-decoration:none;color:inherit;gap:10px"><span style="min-width:0"><b>${esc(r.x.name)}</b><br><span class="muted" style="font-size:13px">${r.paid}/${r.n} à jour${r.late ? ' · ' + r.late + ' en retard' : ''}</span></span><b>${money(r.got)}</b></a>`).join('')}${noSec.length ? `<span class="muted" style="font-size:13px">${noSec.length} membre${noSec.length > 1 ? 's' : ''} sans section</span>` : ''}</section>` : '';
+    return `<div class="between"><h1>Cotisations</h1></div>
+      ${payCard()}
+      <section class="card stack"><div class="between"><span class="eyebrow">${pFR(cur)}</span><span class="pill p-blue num">${paidCount}/${dueNow.length} membres</span></div>
+        <div class="num" style="font-family:var(--f-display);font-size:24px;font-weight:700">${money(collected)} <span class="muted" style="font-size:14px;font-family:var(--f-body);font-weight:500">sur ${money(expected)}</span></div>
+        <div class="bar"><i style="width:${pct(collected, expected)}%"></i></div>
+        <span class="muted num" style="font-size:13px">Reste à encaisser, arriérés compris : ${money(activeMembers().reduce((s, m) => s + dues(m).remaining, 0))}</span></section>
+      <div class="chips" role="group" aria-label="Filtrer">${toConf.length ? `<a class="chip" style="text-decoration:none" href="${B()}/cotisations?f=claims" aria-pressed="${f === 'claims'}">À confirmer (${toConf.length})</a>` : ''}<a class="chip" style="text-decoration:none" href="${B()}/cotisations?f=late" aria-pressed="${f === 'late'}">En retard (${late.length})</a><a class="chip" style="text-decoration:none" href="${B()}/cotisations?f=recent" aria-pressed="${f === 'recent'}">Derniers paiements</a></div>
+      ${list}
+      ${secCard}
+      <section class="card stack"><span class="eyebrow">Règle en vigueur</span><dl class="kv num" style="margin:0">${cats.length ? cats.map(c => `<dt>${esc(c.name)}</dt><dd>${Number(c.fee_amount) ? money(c.fee_amount) : 'Dispensé'}</dd>`).join('') + (activeMembers().some(m => !m.category_id) ? `<dt>Sans catégorie</dt><dd>${fee ? money(fee) : 'Dispensé'}</dd>` : '') : `<dt>Montant</dt><dd>${money(fee)}</dd>`}<dt>Fréquence</dt><dd>Mensuelle</dd><dt>Échéance</dt><dd>Le ${a.fee_due_day} de chaque mois</dd><dt>Suivi depuis</dt><dd>${pFR(ym(a.dues_start))}</dd></dl></section>`;
+  };
+
+  V.encaisser = async (sub, q) => {
+    if (!canCollectAny()) return `${subHead('Encaisser', B() + '/cotisations')}<p class="note">Seuls le trésorier, le président, le vice-président et les trésoriers de section enregistrent les cotisations.</p>`;
+    const a = S.ctx.assoc;
+    if (!hasFees()) return `${subHead('Encaisser', B() + '/cotisations')}<p class="note">Définissez d’abord le montant de la cotisation dans les paramètres.</p>`;
+    const list = activeMembers().filter(m => canCollectFor(m) && feeOf(m) > 0).sort((x, y) => x.full_name.localeCompare(y.full_name, 'fr'));
+    const sel = q.get('m') || (list.find(m => dues(m).isLate) || list[0] || {}).id || '';
+    if (!list.length) return `${subHead('Encaisser', B() + '/cotisations')}<p class="note">Ajoutez d’abord des membres.</p>`;
+    const sm = S.ctx.byId.get(sel) || list[0];
+    return `${subHead('Encaisser une cotisation', B() + '/cotisations')}
+      <form class="stack" data-form="pay" novalidate>
+        <div class="card pay-member"><div class="av" id="pay-av" aria-hidden="true">${esc(initials(sm.full_name))}</div><div style="flex:1;min-width:0"><label for="pay-m" class="sub">Membre</label><select id="pay-m" name="member_id">${list.map(m => opt(m.id, m.full_name + (dues(m).isLate ? ' · en retard' : ''), sel)).join('')}</select><div class="sub" id="pay-cat"></div></div></div>
+        <div class="field"><label for="pay-p">Mois concerné</label><select id="pay-p" name="period"></select></div>
+        <div class="big-amount"><label for="pay-a" class="muted" style="font-size:12.5px">Montant (${esc(CUR_LABEL[a.currency] || a.currency)})</label><input id="pay-a" name="amount" type="number" inputmode="decimal" min="0" step="1"><span class="muted num" id="pay-rule" style="font-size:11.5px"></span><p class="help num" id="pay-conv" hidden></p></div>
+        ${fxFields('pay')}
+        <div class="field"><span style="font-size:13px;font-weight:500;color:var(--muted)" id="pay-mode-l">Mode de paiement</span><div class="radios" role="radiogroup" aria-labelledby="pay-mode-l">${MODES.map((x, k) => `<label><input type="radio" name="payment_method" value="${esc(x)}" ${k === 0 ? 'checked' : ''}>${esc(x)}</label>`).join('')}</div></div>
+        <details class="more"><summary>Date et commentaire</summary><div class="stack" style="margin-top:8px">
+        <div class="field"><label for="pay-date">Date du paiement</label><input id="pay-date" name="occurred_on" type="date" value="${todayISO()}" max="${todayISO()}"></div>
+        <div class="field"><label for="pay-c">Commentaire (facultatif)</label><input id="pay-c" name="comment" placeholder="Ex. remis en main propre à l’AG"></div></div></details>
+        <dl class="card recap num" id="pay-recap" style="margin:0"></dl>
+        <p class="err" hidden></p><button class="btn primary block" type="submit" style="min-height:54px;font-size:15.5px">${I.plus.replace('M12 5v14M5 12h14', 'M5 12l5 5 9-10')} Enregistrer le paiement</button>
+        <p class="help">Aucun argent ne passe par l’application : vous enregistrez un paiement déjà reçu. Le reçu se partage ensuite sur WhatsApp.</p></form>`;
+  };
+  AFTER.encaisser = () => {
+    const ms = $('#pay-m'), ps = $('#pay-p'), am = $('#pay-a');
+    if (!ms) return;
+    const feeSel = () => feeOf(S.ctx.byId.get(ms.value));
+    const fill = () => {
+      const m = S.ctx.byId.get(ms.value); if (!m) return;
+      const d = dues(m), cur = curYM(), fee = feeOf(m);
+      const opts = [...new Set([...d.owed, cur, addMonth(cur, 1), addMonth(cur, 2)])].sort();
+      ps.innerHTML = opts.map(p => opt(p, `${pFR(p)} · ${paidFor(m.id, p) >= fee ? 'déjà payé' : 'reste ' + money(fee - paidFor(m.id, p))}`)).join('');
+      const first = opts.find(p => paidFor(m.id, p) < fee) || cur; ps.value = first;
+      am.value = Math.max(fee - paidFor(m.id, first), 0) || fee;
+      $('#pay-av').textContent = initials(m.full_name);
+      const c = catOf(m); $('#pay-cat').textContent = [c ? c.name : '', d.isLate ? d.late.length + ' mois de retard' : 'à jour'].filter(Boolean).join(' · ');
+      $('#pay-rule').textContent = 'Cotisation' + (c ? ' ' + c.name.toLowerCase() : '') + ' : ' + money(fee) + ' / mois';
+    };
+    const recap = () => {
+      const m = S.ctx.byId.get(ms.value); if (!m) return;
+      const base = S.ctx.assoc.currency, c = $('#pay-cur') ? $('#pay-cur').value : base, r = Number(($('#pay-rate') || {}).value), v = Number(String(am.value).replace(',', '.')) || 0;
+      const got = c === base ? v : (r > 0 ? Math.round(v * r) : 0), left = Math.max(dues(m).remaining - got, 0);
+      $('#pay-recap').innerHTML = `<dt>Mois couvert</dt><dd>${esc(pFR(ps.value))}</dd><dt>Reste dû après</dt><dd class="${left ? 'due' : ''}">${left ? money(left) : 'À jour'}</dd>${m.phone ? `<dt>Reçu à envoyer à</dt><dd>${esc(m.phone)}</dd>` : ''}`;
+    };
+    // Montant proposé = reste dû, converti dans la monnaie reçue.
+    const due = () => Math.max(feeSel() - paidFor(ms.value, ps.value), 0) || feeSel();
+    const curSel = $('#pay-cur'), rateIn = $('#pay-rate');
+    const suggest = () => { const r = Number(rateIn.value); am.value = curSel.value === S.ctx.assoc.currency ? due() : (r > 0 ? Math.round(due() / r * 100) / 100 : ''); };
+    const show = wireFx('pay', 'pay-a', suggest);
+    ms.addEventListener('change', () => { fill(); suggest(); show(); recap(); });
+    ps.addEventListener('change', () => { suggest(); show(); recap(); });
+    am.addEventListener('input', recap); $('#pay-rate').addEventListener('input', recap); $('#pay-cur').addEventListener('change', () => setTimeout(recap));
+    fill(); recap();
+  };
+
+  /* Abonnement VillageLink -------------------------------------------- */
+  V.abonnement = async () => {
+    const a = S.ctx.assoc, st = subStatus(a), head = subHead('Abonnement', B() + '/plus');
+    const reqs = await sb.from('subscription_requests').select('*').eq('association_id', a.id).order('id', { ascending: false }).limit(10).then(r => r.error ? [] : r.data);
+    const pend = reqs.find(r => r.status === 'pending');
+    const n = activeMembers().length, rec = n > PLANS.association.max ? 'federation' : 'association';
+    const state = st === 'active' ? `<span class="pill p-ok">Abonnement actif</span><h2>Formule ${esc((PLANS[a.plan] || {}).label || '')}</h2><span class="muted">Jusqu’au ${dFR(a.paid_until)}</span>`
+      : st === 'trial' ? `<span class="pill p-blue">Essai gratuit</span><h2>${a.trial_ends ? 'Jusqu’au ' + dFR(a.trial_ends) : 'En cours'}</h2>${a.trial_ends ? `<span class="muted">Plus que ${daysUntil(a.trial_ends)} jour(s). Toutes les fonctions sont incluses.</span>` : ''}`
+      : st === 'grace' ? '<span class="pill p-late">Essai terminé</span><h2>Quelques jours de grâce</h2><span class="muted">Activez l’abonnement pour éviter la lecture seule.</span>'
+      : '<span class="pill p-red">Lecture seule</span><h2>L’essai est terminé</h2><span class="muted">Tout reste consultable. L’abonnement rouvre l’enregistrement des paiements, membres, réunions…</span>';
+    const ST = { pending: ['p-late', 'En attente de VillageLink'], activated: ['p-ok', 'Activé'], rejected: ['p-red', 'Refusé'] };
+    const hist = reqs.length ? `<section class="stack"><h2>Paiements d’abonnement</h2><div class="list">${reqs.map(r => `<div class="item" style="align-items:flex-start"><div class="body"><div class="t num" style="white-space:normal">${money(r.amount, 'XOF')} · formule ${esc(PLANS[r.plan].label)} · ${r.months === 12 ? '1 an' : '1 mois'}</div><div class="s wrap">${dFR(localDay(r.created_at))} · ${esc(r.created_label)}${r.reference ? ' · réf. ' + esc(r.reference) : ''}${r.note ? '<br>Motif : ' + esc(r.note) : ''}</div></div><span class="pill ${ST[r.status][0]}">${ST[r.status][1]}</span></div>`).join('')}</div></section>` : '';
+    const plans = Object.entries(PLANS).map(([k, p]) => `<label class="plan${k === rec ? ' rec' : ''}"><input type="radio" name="plan" value="${k}" ${k === rec ? 'checked' : ''}><span class="plan-in"><b>${p.label}</b>${k === rec ? '<span class="pill p-ok">Conseillée</span>' : ''}<span class="muted">Jusqu’à ${p.max} membres${k === 'federation' ? ' · toutes les fonctionnalités' : ' · sans sections, catégories ni plusieurs monnaies'}</span><span class="num"><b>${money(p.month, 'XOF')}</b> / mois</span><span class="num muted">ou ${money(p.year, 'XOF')} / an (2 mois offerts)</span></span></label>`).join('');
+    const pay = IS_TWA ? '<p class="note" style="margin:0">L’abonnement se gère depuis le site de VillageLink. Contactez-nous : contact@villagelinkafrica.com</p>'
+      : pend ? `<p class="note" style="margin:0">Votre paiement de ${money(pend.amount, 'XOF')} est en attente : VillageLink l’active dès qu’il l’a reçu, en général dans la journée.</p>`
+      : `<form class="stack" data-form="subreq" novalidate>
+        <div class="plans">${plans}</div>
+        <div class="radios" role="radiogroup" aria-label="Durée"><label><input type="radio" name="months" value="12" checked>1 an</label><label><input type="radio" name="months" value="1">1 mois</label></div>
+        <section class="card stack"><div class="between"><span class="muted">Montant à payer</span><b class="num" id="sub-amt" style="font-size:22px"></b></div>
+          <a class="btn block wave-btn" id="sub-wave" target="_blank" rel="noopener" href="#">Payer avec Wave</a>
+          <p class="help" style="margin:0">Wave s’ouvre avec le montant déjà rempli, au nom de VillageLink. Revenez ensuite ici.</p></section>
+        <div class="field"><label for="sub-r">Référence du paiement Wave (ID de transaction)</label><input id="sub-r" name="reference" maxlength="60" autocapitalize="characters" placeholder="T_…"></div>
+        <p class="err" hidden></p><button class="btn primary block" type="submit">J’ai payé</button>
+        <p class="help">VillageLink vérifie le paiement et active l’abonnement, en général dans la journée. Rien n’est supprimé pendant ce temps.</p></form>`;
+    return `${head}<section class="card stack">${state}</section>${pay}
+      <p class="help">${n} membre${n > 1 ? 's' : ''} actif${n > 1 ? 's' : ''}. Questions : contact@villagelinkafrica.com</p>${hist}`;
+  };
+  AFTER.abonnement = () => {
+    const f = document.querySelector('form[data-form=subreq]'); if (!f) return;
+    const upd = () => {
+      const p = PLANS[(f.querySelector('input[name=plan]:checked') || {}).value], m = Number((f.querySelector('input[name=months]:checked') || {}).value);
+      const amt = m === 12 ? p.year : p.month;
+      $('#sub-amt').textContent = money(amt, 'XOF'); $('#sub-wave').href = VL_WAVE + '?amount=' + amt; $('#sub-wave').textContent = 'Payer ' + money(amt, 'XOF') + ' avec Wave';
+    };
+    f.addEventListener('change', upd); upd();
+  };
+
+  /* Payer sa cotisation par mobile money ------------------------------ */
+  V.payer = async () => {
+    const me = S.ctx.me, pn = S.ctx.payNums, avail = mmAvail();
+    const head = subHead('Payer ma cotisation', B());
+    if (!hasFees() || !me) return `${head}<p class="note">Aucune cotisation n’est définie pour le moment.</p>`;
+    const fee = feeOf(me);
+    if (!fee) return `${head}<p class="note">Vous êtes dispensé de cotisation.</p>`;
+    if (!avail.length) return `${head}<p class="note">Le trésorier n’a pas encore indiqué de numéro Wave ou Orange Money pour recevoir les cotisations.</p>${canSetPayNums() ? `<a class="btn primary" href="${B()}/parametres">Ajouter les numéros de réception</a>` : ''}`;
+    const mine = must(await sb.from('payment_claims').select('*').eq('member_id', me.id).order('id', { ascending: false }).limit(12));
+    const pendP = new Set(mine.filter(c => c.status === 'pending').map(c => c.period));
+    const d = dues(me), cur = curYM();
+    const opts = [...new Set([...d.owed, cur, addMonth(cur, 1), addMonth(cur, 2)])].sort().filter(p => paidFor(me.id, p) < fee && !pendP.has(p) && !exemptOf(me, p));
+    const ST = { pending: ['p-late', 'En attente du trésorier'], confirmed: ['p-ok', 'Confirmé'], rejected: ['p-red', 'Refusé'], cancelled: ['p-blue', 'Annulé'] };
+    const hist = mine.length ? `<section class="stack"><h2>Mes paiements déclarés</h2><div class="list">${mine.map(c => `<div class="item" style="align-items:flex-start"><div class="body"><div class="t num" style="white-space:normal">${money(c.amount)} · ${esc(c.method)}</div><div class="s wrap">${esc(pFR(c.period))} · ${dFR(localDay(c.created_at))} à ${hm(c.created_at)}${c.reference ? ' · réf. ' + esc(c.reference) : ''}${c.status === 'rejected' && c.reason ? '<br>Motif : ' + esc(c.reason) : ''}</div>${c.status === 'pending' ? `<button class="btn ghost sm" style="margin-top:8px" data-act="claim-cancel" data-id="${c.id}">Annuler cette déclaration</button>` : ''}${c.status === 'confirmed' && c.transaction_id ? `<a class="link" style="display:inline-block;margin-top:6px" href="${B()}/op/${c.transaction_id}?recu=1">Voir le reçu</a>` : ''}</div><span class="pill ${ST[c.status][0]}">${ST[c.status][1]}</span></div>`).join('')}</div></section>` : '';
+    if (!opts.length) return `${head}<p class="note">${pendP.size ? 'Votre paiement est en attente : le trésorier doit vérifier qu’il a bien reçu l’argent.' : 'Vous êtes à jour. Merci !'}</p>${hist}`;
+    return `${head}
+      <form class="stack" data-form="claim" novalidate>
+        <div class="field"><label for="cl-p">Mois à payer</label><select id="cl-p" name="period">${opts.map(p => opt(p, `${pFR(p)} · ${money(fee - paidFor(me.id, p))}`)).join('')}</select></div>
+        <div class="big-amount"><label for="cl-a" class="muted" style="font-size:12.5px">Montant à envoyer (${esc(CUR_LABEL[S.ctx.assoc.currency] || 'FCFA')})</label><input id="cl-a" name="amount" type="number" inputmode="numeric" min="1" step="1"></div>
+        <div class="field"><span style="font-size:13px;font-weight:500;color:var(--muted)" id="cl-m-l">Payer avec</span><div class="radios" role="radiogroup" aria-labelledby="cl-m-l">${avail.map(([l], k) => `<label><input type="radio" name="method" value="${esc(l)}" ${k === 0 ? 'checked' : ''}>${esc(l)}</label>`).join('')}</div></div>
+        <section class="card stack" id="cl-dest"></section>
+        <section class="card stack" id="cl-proof"><span class="eyebrow">Après avoir payé : la preuve</span>
+          <p class="help" style="margin:0">Ajoutez la capture du reçu ou collez le SMS de confirmation : l’application remplit le montant et la référence, et vérifie que l’argent est parti au bon numéro.</p>
+          <div class="row" style="flex-wrap:wrap"><label class="btn ghost sm" for="cl-img" style="cursor:pointer">Capture du reçu</label><input id="cl-img" type="file" accept="image/*" hidden><button type="button" class="btn ghost sm" id="cl-sms-b">Coller le SMS</button></div>
+          <textarea id="cl-sms" rows="3" hidden placeholder="Collez ici le SMS ou le message de confirmation"></textarea>
+          <div id="cl-check" class="stack" aria-live="polite"></div></section>
+        <div class="field"><label for="cl-r">Référence de la transaction (conseillé)</label><input id="cl-r" name="reference" maxlength="60" autocapitalize="characters" placeholder="Dans le SMS ou l’historique Wave"><p class="help">Elle prouve votre paiement si le trésorier ne le retrouve pas.</p></div>
+        <p class="err" hidden></p><button class="btn primary block" type="submit" style="min-height:54px;font-size:15.5px">J’ai payé</button>
+        <p class="help">Votre cotisation sera marquée payée dès que le trésorier aura vu l’argent arriver dans son application. VillageLink ne touche jamais à votre argent ni à votre code secret.</p></form>
+      ${hist}`;
+  };
+  AFTER.payer = () => {
+    const ps = $('#cl-p'), am = $('#cl-a'), box = $('#cl-dest');
+    if (!ps) return;
+    const me = S.ctx.me, fee = feeOf(me), pn = S.ctx.payNums;
+    const fill = () => { am.value = Math.max(fee - paidFor(me.id, ps.value), 0) || fee; dest(); };
+    const dest = () => {
+      const m = (document.querySelector('input[name=method]:checked') || {}).value || '';
+      const k = (MM.find(([l]) => l === m) || [])[1], num = k ? pn[k] : '';
+      const amt = Number(am.value) || 0, wl = m === 'Wave' && /^https:\/\/pay\.wave\.com\/m\//.test(pn.wave_link || '') ? pn.wave_link.replace(/\/?$/, '/') + '?amount=' + amt : '';
+      box.innerHTML = (wl ? `<a class="btn block wave-btn" href="${esc(wl)}" target="_blank" rel="noopener">Payer ${money(amt)} avec Wave</a><p class="help" style="margin:0">Wave s’ouvre avec le montant déjà rempli. Après le paiement, revenez ici et touchez « J’ai payé ».</p><span class="eyebrow" style="margin-top:4px">Ou à la main</span>` : `<span class="eyebrow">Envoyez avec votre application ${esc(m)}</span>`) + `
+        <div class="between" style="flex-wrap:wrap"><span><span class="muted" style="font-size:12.5px">Au numéro</span><br><b class="num" style="font-size:20px">${esc(num)}</b></span><button type="button" class="btn ghost sm" data-act="copy" data-v="${esc(num.replace(/\s/g, ''))}">Copier le numéro</button></div>
+        <div class="between" style="flex-wrap:wrap"><span><span class="muted" style="font-size:12.5px">Montant</span><br><b class="num" style="font-size:20px">${money(Number(am.value) || 0)}</b></span><button type="button" class="btn ghost sm" data-act="copy" data-v="${esc(String(Number(am.value) || 0))}">Copier le montant</button></div>
+        <p class="note" style="margin:0">Avant de valider dans ${esc(m)}, vérifiez que le nom affiché est bien <b>${esc(pn.holder)}</b>. Sinon, n’envoyez rien et prévenez le bureau.</p>`;
+    };
+    ps.addEventListener('change', fill);
+    am.addEventListener('input', dest);
+    document.querySelectorAll('input[name=method]').forEach(r => r.addEventListener('change', dest));
+    fill();
+    // Lecture du reçu (capture ou SMS)
+    const chk = $('#cl-check'), img = $('#cl-img'), sms = $('#cl-sms');
+    const line = ([k, t]) => `<div class="chk chk-${k}">${k === 'ok' ? '✓' : k === 'warn' ? '!' : '✗'} ${esc(t)}</div>`;
+    const apply = r => {
+      if (!r.amount && !r.reference) { chk.innerHTML = line(['warn', 'Aucun montant ni référence trouvés. Essayez une capture plus nette, ou collez le SMS.']); return; }
+      if (r.method) { const rb = document.querySelector(`input[name=method][value="${r.method}"]`); if (rb && !rb.checked) rb.checked = true; }
+      const meth = (document.querySelector('input[name=method]:checked') || {}).value || '';
+      const k = (MM.find(([l]) => l === meth) || [])[1], num = k ? pn[k] : '';
+      const expected = Math.max(fee - paidFor(me.id, ps.value), 0) || fee, items = [];
+      if (r.amount) {
+        am.value = r.amount;
+        if (r.sent && r.sent !== r.amount) items.push(['warn', `Vous avez envoyé ${money(r.sent)}, l’association a reçu ${money(r.amount)}${r.fee ? ` (frais ${money(r.fee)} déduits)` : ''}. C’est ${money(r.amount)} qui sera compté.`]);
+        items.push(r.amount === expected ? ['ok', 'Montant reçu : ' + money(r.amount)] : r.amount < expected ? ['warn', `Il manque ${money(expected - r.amount)} pour la cotisation de ${pFR(ps.value)} (${money(expected)}).${r.fee ? ' La prochaine fois, ajoutez les frais au montant envoyé.' : ''}`] : ['warn', `Montant reçu : ${money(r.amount)}, plus que la cotisation de ${pFR(ps.value)} (${money(expected)}).`]);
+      }
+      else items.push(['warn', 'Montant non trouvé : saisissez-le à la main.']);
+      if (r.reference) { $('#cl-r').value = r.reference; items.push(['ok', 'Référence : ' + r.reference]); }
+      else items.push(['warn', 'Référence non trouvée : recopiez-la si vous la voyez.']);
+      const dm = VLReceipt.matchesDest(r, num, pn.holder);
+      items.push(dm ? ['ok', dm === 'number' ? `Envoyé au bon numéro (${num})` : `Envoyé à ${pn.holder}`] : ['bad', `Le numéro de l’association (${num}) n’apparaît pas sur le reçu. Vérifiez que l’argent est parti au bon destinataire.`]);
+      if (r.date) { const days = (Date.now() - Date.parse(r.date)) / 864e5; items.push(days > 31 ? ['bad', `Ce reçu date du ${dFR(r.date)} : il est peut-être ancien.`] : ['ok', 'Date : ' + dFR(r.date)]); }
+      chk.innerHTML = items.map(line).join('') + '<p class="help" style="margin:0">Vérifiez ces informations, puis touchez « J’ai payé ». Le trésorier confirmera après avoir vu l’argent dans son application.</p>';
+      dest();
+    };
+    $('#cl-sms-b').addEventListener('click', () => { sms.hidden = false; sms.focus(); });
+    let t = 0;
+    sms.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { if (sms.value.trim().length > 15) apply(VLReceipt.parse(sms.value)); }, 300); });
+    img.addEventListener('change', async () => {
+      const f = img.files && img.files[0]; if (!f) return;
+      chk.innerHTML = '<p class="muted" style="margin:0">Lecture de la capture… La première fois, le lecteur se télécharge (quelques secondes).</p>';
+      try {
+        const text = await VLReceipt.ocr(f, p => { chk.innerHTML = `<p class="muted" style="margin:0">Lecture de la capture… ${p} %</p>`; });
+        apply(VLReceipt.parse(text));
+      } catch (e) { chk.innerHTML = line(['warn', (e && e.message ? e.message + ' ' : '') + 'Collez plutôt le SMS, ou recopiez la référence à la main.']); }
+      img.value = '';
+    });
+  };
+
+  /* Plusieurs devises ------------------------------------------------ */
+  // Parités fixes du franc CFA ; les autres taux se saisissent et sont retenus sur ce téléphone.
+  const FX_FIXED = { 'EUR>XOF': 655.957, 'EUR>XAF': 655.957, 'XOF>XAF': 1, 'XAF>XOF': 1, 'XOF>EUR': 1 / 655.957, 'XAF>EUR': 1 / 655.957 };
+  const fxRate = (from, to) => { if (from === to) return 1; const k = from + '>' + to; return FX_FIXED[k] || Number(store.get('vl:fx:' + k)) || 0; };
+  const r6 = x => Math.round(x * 1e6) / 1e6;
+  const fxFields = pfx => `<div class="row2" ${fullPlan() ? '' : 'hidden'}><div class="field"><label for="${pfx}-cur">Monnaie</label><select id="${pfx}-cur" name="pay_cur">${CURRENCIES.filter(([k]) => fullPlan() || k === S.ctx.assoc.currency).map(([k]) => opt(k, (CUR_LABEL[k] === k ? k : CUR_LABEL[k] + ' · ' + k), S.ctx.assoc.currency)).join('')}</select></div>
+    <div class="field" id="${pfx}-ratebox" hidden><label for="${pfx}-rate">Taux : 1 <span data-fxcur></span> =</label><input id="${pfx}-rate" name="rate" type="number" inputmode="decimal" step="any" min="0" placeholder="en ${esc(CUR_LABEL[S.ctx.assoc.currency] || S.ctx.assoc.currency)}"></div></div>`;
+  // Relie la monnaie, le taux et le montant d'un formulaire ; onCur(ancienne, nouvelle, taux) permet de recalculer le montant proposé.
+  function wireFx(pfx, amountId, onCur) {
+    const sel = $('#' + pfx + '-cur'), box = $('#' + pfx + '-ratebox'), rate = $('#' + pfx + '-rate'), conv = $('#' + pfx + '-conv'), am = $('#' + amountId);
+    if (!sel || !am) return;
+    const base = S.ctx.assoc.currency, lab = document.querySelector('label[for=' + amountId + ']');
+    const show = () => {
+      const c = sel.value, foreign = c !== base, r = Number(rate.value), v = Number(String(am.value).replace(',', '.'));
+      box.hidden = !foreign; conv.hidden = !foreign;
+      am.step = foreign ? 'any' : '1';
+      if (lab) lab.textContent = `Montant (${CUR_LABEL[c] || c})`;
+      box.querySelector('[data-fxcur]').textContent = CUR_LABEL[c] || c;
+      if (foreign) conv.innerHTML = r > 0 && v > 0 ? `Soit <b>${money(Math.round(Math.round(v * 100) / 100 * r6(r)))}</b> enregistrés dans la caisse.` : 'Indiquez le taux pour voir le montant en ' + esc(CUR_LABEL[base] || base) + '.';
+    };
+    let prev = sel.value;
+    sel.addEventListener('change', () => { const r = fxRate(sel.value, base); rate.value = sel.value === base ? '' : (r ? String(r6(r)) : ''); if (onCur) onCur(prev, sel.value, r); prev = sel.value; show(); });
+    rate.addEventListener('input', () => { if (onCur) onCur(sel.value, sel.value, Number(rate.value)); show(); });
+    am.addEventListener('input', show);
+    show();
+    return show;
+  }
+  // Lit le montant d'un formulaire : montant dans la monnaie de la caisse + infos d'origine éventuelles.
+  function readAmount(fd) {
+    const base = S.ctx.assoc.currency, c = val(fd, 'pay_cur') || base, raw = Number(val(fd, 'amount').replace(',', '.'));
+    if (!(raw > 0)) fail('Saisissez un montant supérieur à 0.');
+    if (c === base) return { amount: Math.round(raw), fx: {} };
+    const rate = r6(Number(val(fd, 'rate').replace(',', '.')));
+    if (!(rate > 0)) fail(`Indiquez le taux : combien vaut 1 ${CUR_LABEL[c] || c} en ${CUR_LABEL[base] || base} ?`);
+    const orig = Math.round(raw * 100) / 100, amount = Math.round(orig * rate);
+    if (!(amount > 0)) fail('Le montant converti est trop petit.');
+    if (!FX_FIXED[c + '>' + base]) store.set('vl:fx:' + c + '>' + base, String(rate));
+    return { amount, fx: { orig_amount: orig, orig_currency: c, fx_rate: rate } };
+  }
+
+  /* Finances --------------------------------------------------------- */
+  const PAGE = 30;
+  V.finances = async (sub, q) => {
+    const f = ['all', 'in', 'out', 'hors'].includes(q.get('f')) ? q.get('f') : 'all', p = Math.max(0, Math.floor(Number(q.get('p'))) || 0);
+    let qy = sb.from('transactions').select('*').eq('association_id', S.ctx.assoc.id);
+    if (f === 'in') qy = qy.eq('kind', 'in');
+    if (f === 'out') qy = qy.eq('kind', 'out');
+    if (f === 'hors') qy = qy.neq('category', 'Cotisations');
+    const rows = must(await qy.order('occurred_on', { ascending: false }).order('id', { ascending: false }).range(p * PAGE, p * PAGE + PAGE));
+    const more = rows.length > PAGE; if (more) rows.pop();
+    const rset = await reversedSet(rows);
+    const link = (np) => `${B()}/finances?f=${f}&p=${np}`;
+    return `
+      <div class="row" style="flex-wrap:wrap">${can('collect') ? `<a class="btn primary sm" href="${B()}/operation?type=in">+ Recette</a>` : ''}${can('spend') ? `<a class="btn ghost sm" href="${B()}/operation?type=out">${S.ctx.assoc.expense_approval ? '+ Proposer une dépense' : '+ Dépense'}</a>` : ''}</div>
+      ${S.ctx.assoc.expense_approval || S.ctx.expPending ? `<a class="card between" href="${B()}/depenses"><span><b>Dépenses à valider</b><br><span class="muted" style="font-size:13px">${S.ctx.expPending ? S.ctx.expPending + ' en attente d’approbation' : 'Aucune en attente · voir l’historique'}</span></span>${S.ctx.expPending ? `<span class="pill p-late num">${S.ctx.expPending}</span>` : `<span class="chev">${I.chev}</span>`}</a>` : ''}
+      <div class="chips" role="group" aria-label="Filtrer">${[['all', 'Tout'], ['hors', 'Hors cotisations'], ['in', 'Recettes'], ['out', 'Dépenses']].map(([k, l]) => `<a class="chip" style="text-decoration:none" href="${B()}/finances?f=${k}" aria-pressed="${f === k}">${l}</a>`).join('')}</div>
+      <div class="list">${rows.map(t => txItem(t, rset)).join('') || '<div class="empty">Aucune opération.</div>'}</div>
+      ${p || more ? `<div class="pager">${p ? `<a class="btn ghost sm" href="${link(p - 1)}">← Plus récentes</a>` : '<span></span>'}${more ? `<a class="btn ghost sm" href="${link(p + 1)}">Plus anciennes →</a>` : ''}</div>` : ''}`;
+  };
+
+  V.operation = async (sub, q) => {
+    const type = q.get('type') === 'out' ? 'out' : 'in';
+    if (type === 'out' && !can('spend')) return `${subHead('Dépense', B() + '/finances')}<p class="note">Seul le trésorier enregistre les dépenses.</p>`;
+    if (type === 'in' && !can('collect')) return `${subHead('Recette', B() + '/finances')}<p class="note">Seuls le trésorier et le président enregistrent les recettes.</p>`;
+    const projects = must(await sb.from('projects').select('id,name,status').eq('association_id', S.ctx.assoc.id).neq('status', 'Terminé').order('created_at', { ascending: false }));
+    const cats = type === 'out' ? CAT_OUT : CAT_IN;
+    const pre = q.get('projet') || '';
+    const approval = type === 'out' && S.ctx.assoc.expense_approval;
+    const col = q.get('collecte') ? must(await sb.from('collections').select('*').eq('association_id', S.ctx.assoc.id).eq('id', q.get('collecte')).maybeSingle()) : null;
+    const back = col ? B() + '/collecte/' + col.id : B() + '/finances';
+    if (col) {
+      const mem = activeMembers().slice().sort((x, y) => x.full_name.localeCompare(y.full_name, 'fr'));
+      return `${subHead(type === 'out' ? 'Remise de la collecte' : 'Contribution', back)}
+      <p class="note"><b>${esc(col.title)}</b>${col.beneficiary ? ' · ' + esc(col.beneficiary) : ''}${approval ? '<br>La remise sera envoyée au président ou au vice-président pour approbation.' : ''}</p>
+      <form class="stack" data-form="op" data-type="${type}" novalidate><input type="hidden" name="collection_id" value="${esc(col.id)}">
+        <input type="hidden" name="category" value="${type === 'out' ? 'Autres' : 'Contributions exceptionnelles'}">
+        ${type === 'in' ? `<div class="field"><label for="op-m">Contributeur</label><select id="op-m" name="member_id"><option value="">Une personne hors de l’association</option>${mem.map(m => opt(m.id, m.full_name)).join('')}</select></div>` : ''}
+        ${fxFields('op')}
+        <div class="field"><label for="op-a">Montant (${esc(CUR_LABEL[S.ctx.assoc.currency] || S.ctx.assoc.currency)})</label><input id="op-a" name="amount" type="number" inputmode="decimal" min="0" step="1" value="${type === 'in' && col.suggested ? esc(col.suggested) : ''}" required><p class="help num" id="op-conv" hidden></p></div>
+        <div class="field"><label for="op-d">Description</label><input id="op-d" name="description" maxlength="300" value="${type === 'out' ? esc('Remise de la collecte à ' + (col.beneficiary || 'la famille')) : ''}" placeholder="${type === 'out' ? '' : 'Ex. contribution de la famille Bah (hors association)'}"><p class="help">${type === 'in' ? 'Laissez vide pour un membre : « Contribution de … » sera écrit pour vous.' : 'Qui a reçu l’argent, et comment.'}</p></div>
+        ${type === 'in' ? `<div class="field"><label for="op-mode">Mode de paiement</label><select id="op-mode" name="payment_method">${MODES.map(x => opt(x, x)).join('')}</select></div>` : ''}
+        <div class="field"><label for="op-date">Date</label><input id="op-date" name="occurred_on" type="date" value="${todayISO()}" max="${todayISO()}"></div>
+        ${type === 'out' ? '<div class="field"><label for="op-f">Justificatif (photo de la remise, facultatif)</label><input id="op-f" name="proof" type="file" accept="image/*,application/pdf"></div>' : ''}
+        <div class="field"><label for="op-c">Commentaire (facultatif)</label><input id="op-c" name="comment"></div>
+        <p class="err" hidden></p><button class="btn primary block" type="submit">${type === 'out' ? (approval ? 'Envoyer pour approbation' : 'Enregistrer la remise') : 'Enregistrer la contribution'}</button></form>`;
+    }
+    return `${subHead(approval ? 'Proposer une dépense' : type === 'out' ? 'Nouvelle dépense' : 'Nouvelle recette', B() + '/finances')}
+      ${approval ? '<p class="note">Double validation : la dépense n’entrera dans la caisse qu’après l’approbation du président ou du vice-président. Joignez le reçu pour l’aider à décider.</p>' : ''}
+      ${type === 'in' ? `<p class="note">Pour une cotisation mensuelle, utilisez plutôt <a class="link" href="${B()}/encaisser">Enregistrer un paiement</a> : le membre sera marqué à jour.</p>` : ''}
+      <form class="stack" data-form="op" data-type="${type}" novalidate>
+        <div class="field"><label for="op-cat">Catégorie</label><select id="op-cat" name="category">${cats.map(c => opt(c, c, pre && type === 'in' ? 'Dons' : pre ? 'Projet' : '')).join('')}</select></div>
+        ${fxFields('op')}
+        <div class="field"><label for="op-a">Montant (${esc(CUR_LABEL[S.ctx.assoc.currency] || S.ctx.assoc.currency)})</label><input id="op-a" name="amount" type="number" inputmode="decimal" min="0" step="1" required><p class="help num" id="op-conv" hidden></p></div>
+        <div class="field"><label for="op-p">Projet lié (facultatif)</label><select id="op-p" name="project_id"><option value="">Aucun, fonds général</option>${projects.map(p => opt(p.id, p.name, pre)).join('')}</select></div>
+        <div class="field"><label for="op-d">Description</label><input id="op-d" name="description" maxlength="300" placeholder="${type === 'out' ? 'Ex. achat de 20 sacs de ciment' : 'Ex. don de la famille Bah'}" required></div>
+        ${type === 'in' ? `<div class="field"><label for="op-mode">Mode de paiement</label><select id="op-mode" name="payment_method">${MODES.map(x => opt(x, x)).join('')}</select></div>` : ''}
+        <div class="field"><label for="op-date">Date</label><input id="op-date" name="occurred_on" type="date" value="${todayISO()}" max="${todayISO()}"></div>
+        <div class="field"><label for="op-f">Justificatif (photo ou PDF, facultatif)</label><input id="op-f" name="proof" type="file" accept="image/*,application/pdf"><p class="help">La photo est réduite avant l’envoi pour économiser vos données.</p></div>
+        <div class="field"><label for="op-c">Commentaire (facultatif)</label><input id="op-c" name="comment"></div>
+        <p class="err" hidden></p><button class="btn primary block" type="submit">${approval ? 'Envoyer pour approbation' : 'Enregistrer'}</button></form>`;
+  };
+
+  AFTER.operation = () => wireFx('op', 'op-a');
+  V.op = async (sub, q) => {
+    const id = Number(sub[1]);
+    const t = must(await sb.from('transactions').select('*').eq('association_id', S.ctx.assoc.id).eq('id', id).maybeSingle());
+    if (!t) return `${subHead('Opération introuvable', B() + '/finances')}`;
+    const [rev, orig, proj] = await Promise.all([
+      sb.from('transactions').select('*').eq('reversal_of', t.id).maybeSingle().then(must),
+      t.reversal_of ? sb.from('transactions').select('*').eq('id', t.reversal_of).maybeSingle().then(must) : null,
+      t.project_id ? sb.from('projects').select('id,name').eq('id', t.project_id).maybeSingle().then(must) : null
+    ]);
+    const author = S.ctx.members.find(m => m.user_id && m.user_id === t.created_by);
+    const m = t.member_id ? S.ctx.byId.get(t.member_id) : null;
+    const isReceipt = q.get('recu') === '1' && m;
+    const receipt = receiptText(t, m, author);
+    return `${subHead(isReceipt ? 'Paiement enregistré' : 'Opération ' + txRef(t.id), m ? B() + '/m/' + m.id : B() + '/finances')}
+      ${isReceipt ? `<div class="receipt stack num"><div class="between"><b>Reçu ${txRef(t.id)}</b><span class="pill p-ok">Payé</span></div><dl class="kv" style="margin:0"><dt>Membre</dt><dd>${esc(m.full_name)}</dd><dt>Objet</dt><dd>${esc(t.description)}</dd><dt>Montant</dt><dd>${money(t.amount)}${t.orig_currency ? ` (${origTag(t)})` : ''}</dd><dt>Mode</dt><dd>${esc(t.payment_method || '—')}</dd><dt>Date</dt><dd>${whenTx(t)}</dd></dl>
+        ${t.period && paidFor(m.id, t.period) < feeOf(m) ? `<span class="pill p-late">Reste ${money(feeOf(m) - paidFor(m.id, t.period))} pour ${pFR(t.period)}</span>` : ''}</div>
+        <a class="btn wa block" target="_blank" rel="noopener" href="${waTo(m.phone, receipt)}">${I.wa} Envoyer le reçu sur WhatsApp</a>
+        <a class="btn ghost block" href="${B()}/recu/${t.id}">Reçu en PDF</a>
+        <a class="btn ghost block" href="${B()}/encaisser">Enregistrer un autre paiement</a>` : `
+      <section class="card stack num"><div class="between"><span class="pill ${t.kind === 'in' ? 'p-ok' : 'p-red'}">${t.kind === 'in' ? 'Recette' : 'Dépense'} · ${esc(t.category)}</span><span class="amt ${effect(t) >= 0 ? 'in' : 'out'}" style="font-size:18px">${effect(t) >= 0 ? '+' : '−'}${money(Math.abs(t.amount))}</span></div>
+        <dl class="kv" style="margin:0"><dt>Objet</dt><dd>${esc(t.description)}</dd>${t.orig_currency ? `<dt>Montant reçu</dt><dd>${origTag(t)}</dd><dt>Taux</dt><dd>1 ${esc(CUR_LABEL[t.orig_currency] || t.orig_currency)} = ${rateFmt(t.fx_rate)} ${esc(CUR_LABEL[S.ctx.assoc.currency] || S.ctx.assoc.currency)}</dd>` : ''}${m ? `<dt>Membre</dt><dd>${esc(m.full_name)}</dd>` : ''}${t.period ? `<dt>Mois</dt><dd>${pFR(t.period)}</dd>` : ''}${proj ? `<dt>Projet</dt><dd>${esc(proj.name)}</dd>` : ''}<dt>Date</dt><dd>${dFR(t.occurred_on)}</dd>${t.payment_method ? `<dt>Mode</dt><dd>${esc(t.payment_method)}</dd>` : ''}<dt>${t.approved_label ? 'Proposé par' : 'Saisi par'}</dt><dd>${esc(author ? author.full_name : t.requested_label || '—')}</dd>${t.approved_label ? `<dt>Approuvé par</dt><dd>${esc(t.approved_label)}</dd>` : ''}<dt>Saisi le</dt><dd>${dFR(t.created_at)} à ${hm(t.created_at)}</dd>${t.comment ? `<dt>${t.reversal_of ? 'Motif' : 'Commentaire'}</dt><dd>${esc(t.comment)}</dd>` : ''}</dl>
+        ${t.proof_path ? `<button class="btn ghost sm" data-act="proof" data-path="${esc(t.proof_path)}">Voir le justificatif</button><div id="proof-box"></div>` : '<span class="muted" style="font-size:13px">Aucun justificatif</span>'}</section>
+      ${rev ? `<p class="note">Opération annulée le ${dFR(rev.occurred_on)} par la contre-écriture <a class="link" href="${B()}/op/${rev.id}">${txRef(rev.id)}</a>. Motif : ${esc(rev.comment)}</p>` : ''}
+      ${orig ? `<p class="note">Cette ligne annule <a class="link" href="${B()}/op/${orig.id}">${txRef(orig.id)}</a>. Les deux restent visibles dans l’historique.</p>` : ''}
+      ${m && !t.reversal_of ? `<a class="btn wa block" target="_blank" rel="noopener" href="${waTo(m.phone, receipt)}">${I.wa} Envoyer le reçu</a>` : ''}
+      ${t.kind === 'in' && !t.reversal_of && !rev ? `<a class="btn ghost block" href="${B()}/recu/${t.id}">Reçu en PDF</a>` : ''}
+      ${can('reverse') && !rev && !t.reversal_of ? `<form class="card stack" data-form="reverse" data-id="${t.id}" novalidate><h2>Corriger une erreur</h2><p class="muted" style="margin:0;font-size:13.5px">L’opération ne sera pas effacée. Une contre-écriture du même montant sera ajoutée, visible par tous les membres.</p><div class="field"><label for="rv-r">Motif de l’annulation</label><input id="rv-r" name="reason" placeholder="Ex. montant saisi deux fois"></div><p class="err" hidden></p><button class="btn danger block" type="submit">Annuler par contre-écriture</button></form>` : ''}`}`;
+  };
+  // Montant en toutes lettres (règles de 1990 : traits d'union partout).
+  function enLettres(n) {
+    n = Math.floor(Math.abs(Number(n) || 0));
+    if (n === 0) return 'zéro';
+    const U = ['', 'un', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf', 'dix', 'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize', 'dix-sept', 'dix-huit', 'dix-neuf'];
+    const D = ['', '', 'vingt', 'trente', 'quarante', 'cinquante', 'soixante', 'soixante', 'quatre-vingt', 'quatre-vingt'];
+    const below100 = x => {
+      if (x < 20) return U[x];
+      const d = Math.floor(x / 10), u = x % 10;
+      if (d === 7 || d === 9) return D[d] + (d === 7 && u === 1 ? '-et-' : '-') + U[10 + u];
+      if (d === 8) return u ? D[8] + '-' + U[u] : 'quatre-vingts';
+      return D[d] + (u === 1 ? '-et-un' : u ? '-' + U[u] : '');
+    };
+    const below1000 = (x, last) => {
+      const c = Math.floor(x / 100), r = x % 100;
+      let out = c ? (c > 1 ? U[c] + '-cent' + (r === 0 && last ? 's' : '') : 'cent') : '';
+      if (r) out += (out ? '-' : '') + below100(r);
+      if (!last && out.endsWith('quatre-vingts')) out = out.slice(0, -1);
+      return out;
+    };
+    const parts = [];
+    [[1e9, 'milliard'], [1e6, 'million'], [1e3, 'mille']].forEach(([v, w]) => {
+      const k = Math.floor(n / v); n %= v;
+      if (!k) return;
+      if (w === 'mille') parts.push(k === 1 ? 'mille' : below1000(k, false) + '-mille');
+      else parts.push(below1000(k, true) + '-' + w + (k > 1 ? 's' : ''));
+    });
+    if (n) parts.push(below1000(n, true));
+    return parts.join('-');
+  }
+  const CUR_WORDS = { XOF: 'francs CFA', XAF: 'francs CFA', GNF: 'francs guinéens', EUR: 'euros', USD: 'dollars', CAD: 'dollars canadiens', GBP: 'livres sterling' };
+
+  V.recu = async (sub) => {
+    const a = S.ctx.assoc, id = Number(sub[1]);
+    const t = must(await sb.from('transactions').select('*').eq('association_id', a.id).eq('id', id).maybeSingle());
+    if (!t || t.kind !== 'in' || t.reversal_of) return subHead('Reçu introuvable', B() + '/finances');
+    const rev = must(await sb.from('transactions').select('id').eq('reversal_of', t.id).maybeSingle());
+    const m = t.member_id ? S.ctx.byId.get(t.member_id) : null;
+    const author = S.ctx.members.find(x => x.user_id && x.user_id === t.created_by);
+    const words = enLettres(t.amount);
+    return `<div class="no-print">${subHead('Reçu ' + txRef(t.id), B() + '/op/' + t.id)}</div>
+      ${rev ? '<p class="note">Ce paiement a été annulé par contre-écriture : le reçu n’est plus valable.</p>' : ''}
+      <article class="receipt-doc ${rev ? 'void' : ''}">
+        <header><div class="rd-logo">${esc(initials(a.name).slice(0, 1))}</div><div><b>${esc(a.name)}</b><small>${esc([a.village, a.region, a.origin_country].filter(Boolean).join(' · '))}${a.residence_city ? ' — ' + esc(a.residence_city) : ''}</small></div></header>
+        <div class="rd-title"><span>Reçu de paiement</span><b class="num">N° ${txRef(t.id)}</b></div>
+        <dl class="kv num"><dt>Reçu de</dt><dd>${esc(m ? m.full_name : t.description)}</dd><dt>Objet</dt><dd>${esc(t.category === 'Cotisations' && t.period ? 'Cotisation de ' + pFR(t.period) : t.description)}</dd>${t.payment_method ? `<dt>Mode</dt><dd>${esc(t.payment_method)}</dd>` : ''}<dt>Date</dt><dd>${dFR(t.occurred_on)}</dd>${t.orig_currency ? `<dt>Montant versé</dt><dd>${origTag(t)} (1 ${esc(CUR_LABEL[t.orig_currency] || t.orig_currency)} = ${rateFmt(t.fx_rate)} ${esc(CUR_LABEL[a.currency] || a.currency)})</dd>` : ''}</dl>
+        <div class="rd-amount num">${money(t.amount)}</div>
+        <p class="rd-words">Arrêté le présent reçu à la somme de <b>${esc(words)} ${esc(CUR_WORDS[a.currency] || a.currency)}</b>.</p>
+        <footer><div><small>Enregistré par</small><b>${esc(author ? author.full_name : '—')}</b><small>${esc(author ? ROLES[author.role] || '' : '')} · le ${dFR(t.created_at)} à ${hm(t.created_at)}</small></div><div class="rd-stamp">${rev ? 'Annulé' : 'Payé'}</div></footer>
+        <p class="rd-check">Reçu vérifiable par tous les membres dans VillageLink, opération ${txRef(t.id)}. Aucune opération ne peut être modifiée ni effacée.</p>
+      </article>
+      <div class="row no-print" style="flex-wrap:wrap">${rev ? '' : '<button class="btn primary sm" data-act="print">Télécharger en PDF</button>'}${m && !rev ? `<a class="btn wa sm" target="_blank" rel="noopener" href="${waTo(m.phone, receiptText(t, m, author))}">${I.wa} Envoyer sur WhatsApp</a>` : ''}</div>
+      <p class="help no-print">Sur le téléphone : « Télécharger en PDF », puis choisissez « Enregistrer au format PDF » comme imprimante.</p>`;
+  };
+
+  function receiptText(t, m, author) {
+    const a = S.ctx.assoc;
+    return `Reçu ${txRef(t.id)}\n${a.name}\n\n${m ? 'Membre : ' + m.full_name + '\n' : ''}${t.description}\nMontant : ${money(t.amount)}${t.orig_currency ? ' (' + origTag(t) + ')' : ''}\nMode : ${t.payment_method || '—'}\nDate : ${whenTx(t)}\nEnregistré par : ${author ? author.full_name : S.ctx.me.full_name}\n\nMerci pour votre contribution au développement de ${a.village || 'notre village'}.`;
+  }
+
+  /* Messages vocaux ------------------------------------------------- */
+  const VOICE = {}; // clé du formulaire → { blob, secs, mime } ou { rec, stream, t0 }
+  const fmtSecs = n => `${Math.floor(n / 60)}:${String(Math.round(n) % 60).padStart(2, '0')}`;
+  const voiceBox = key => `<div class="voice" data-voice="${key}"><button type="button" class="btn ghost sm" data-act="rec" data-key="${key}">${I.mic} Message vocal</button><span class="voice-state"></span></div>`;
+  const voicePlay = (path, secs) => path ? `<div class="voice-play"><button type="button" class="btn ghost sm" data-act="play" data-path="${esc(path)}">▶ Écouter${secs ? ' · ' + fmtSecs(secs) : ''}</button></div>` : '';
+  function voiceMime() {
+    const c = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/ogg'];
+    return c.find(t => window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+  }
+  function voiceDraw(key) {
+    const box = document.querySelector(`[data-voice="${key}"]`); if (!box) return;
+    const v = VOICE[key], btn = box.querySelector('[data-act=rec]'), st = box.querySelector('.voice-state');
+    if (v && v.rec) { btn.innerHTML = '■ Arrêter'; btn.classList.add('danger'); st.innerHTML = `<span class="rec-dot"></span> ${fmtSecs((Date.now() - v.t0) / 1000)}`; return; }
+    btn.classList.remove('danger'); btn.innerHTML = `${I.mic} ${v && v.blob ? 'Recommencer' : 'Message vocal'}`;
+    st.innerHTML = v && v.blob ? `<audio controls preload="metadata" src="${v.url}"></audio><button type="button" class="link" data-act="recdel" data-key="${key}">Supprimer</button>` : '';
+  }
+  async function voiceToggle(key) {
+    const v = VOICE[key];
+    if (v && v.rec) { v.rec.stop(); return; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) fail('Votre navigateur ne permet pas d’enregistrer un message vocal. Essayez avec Chrome.');
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { fail('Autorisez le micro pour VillageLink dans les réglages du navigateur, puis réessayez.'); }
+    const mime = voiceMime(), chunks = [];
+    const rec = new MediaRecorder(stream, mime ? { mimeType: mime, audioBitsPerSecond: 32000 } : undefined);
+    const cur = { rec, stream, t0: Date.now() };
+    VOICE[key] = cur;
+    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop = () => {
+      clearInterval(cur.tick); clearTimeout(cur.cap); stream.getTracks().forEach(t => t.stop());
+      const type = (rec.mimeType || mime || 'audio/webm').split(';')[0];
+      const blob = new Blob(chunks, { type }), secs = Math.max(1, Math.round((Date.now() - cur.t0) / 1000));
+      VOICE[key] = blob.size ? { blob, secs, mime: type, url: URL.createObjectURL(blob) } : null;
+      voiceDraw(key);
+    };
+    rec.start(1000);
+    cur.tick = setInterval(() => voiceDraw(key), 500);
+    cur.cap = setTimeout(() => { if (rec.state === 'recording') rec.stop(); }, 180000);
+    voiceDraw(key);
+  }
+  // Envoie le vocal du formulaire (s'il y en a un) et renvoie { audio_path, audio_seconds }.
+  async function voiceUpload(key) {
+    const v = VOICE[key];
+    if (v && v.rec) fail('Arrêtez d’abord l’enregistrement.');
+    if (!v || !v.blob) return {};
+    if (v.blob.size > 3 * 1024 * 1024) fail('Le message vocal est trop long (3 Mo maximum).');
+    const ext = { 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3', 'audio/aac': 'aac' }[v.mime] || 'webm';
+    const path = `${S.ctx.assoc.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    must(await sb.storage.from('voice').upload(path, v.blob, { contentType: v.mime, upsert: false }));
+    return { audio_path: path, audio_seconds: Math.min(v.secs, 600) };
+  }
+  const voiceDone = key => { const v = VOICE[key]; if (v && v.url) URL.revokeObjectURL(v.url); delete VOICE[key]; };
+
+  /* Sections ------------------------------------------------------- */
+  V.sections = async (sub) => {
+    const secs = S.ctx.sections || [], mg = can('sections');
+    if (sub[1] === 'nouvelle' || (sub[1] && sub[2] === 'modifier')) {
+      if (!mg) return `${subHead('Section', B() + '/sections')}<p class="note">Réservé au président, au vice-président et au secrétaire général.</p>`;
+      const x = sub[1] === 'nouvelle' ? null : secs.find(y => y.id === sub[1]);
+      if (sub[1] !== 'nouvelle' && !x) return subHead('Section introuvable', B() + '/sections');
+      const inSec = x ? activeMembers().filter(m => m.section_id === x.id) : [];
+      return `${subHead(x ? 'Modifier la section' : 'Nouvelle section', B() + '/sections')}
+        <form class="stack" data-form="section" data-id="${x ? x.id : ''}" novalidate>
+          <div class="field"><label for="sc-n">Nom</label><input id="sc-n" name="name" maxlength="80" value="${esc(x && x.name)}" placeholder="Ex. Section de Dakar" required></div>
+          <div class="row2"><div class="field"><label for="sc-c">Ville</label><input id="sc-c" name="city" value="${esc(x && x.city)}"></div><div class="field"><label for="sc-p">Pays</label><input id="sc-p" name="country" value="${esc(x && x.country)}"></div></div>
+          ${x ? `<div class="field"><label for="sc-t">Trésorier de la section</label><select id="sc-t" name="treasurer_member_id"><option value="">Aucun</option>${inSec.map(m => opt(m.id, m.full_name, x.treasurer_member_id)).join('')}</select><p class="help">Il encaisse les cotisations des membres de cette section, et rien d’autre. Rangez d’abord les membres dans la section (fiche du membre).</p></div>` : '<p class="help">Après la création, rangez les membres dans la section depuis leur fiche, puis choisissez le trésorier de la section.</p>'}
+          <p class="err" hidden></p><button class="btn primary block" type="submit">${x ? 'Enregistrer' : 'Créer la section'}</button>
+          ${x ? `<button class="btn danger block" type="button" data-act="delsection" data-id="${x.id}">Supprimer la section</button><p class="help">Les membres restent dans l’association, sans section.</p>` : ''}</form>`;
+    }
+    const act = activeMembers(), fee = hasFees() ? 1 : 0, cur = curYM();
+    return `
+      ${mg ? (fullPlan() ? `<a class="btn primary block" href="${B()}/sections/nouvelle">${I.plus} Nouvelle section</a>` : upsell('Les sections : Dakar, Conakry, France… chacune avec son trésorier')) : ''}
+      <p class="note">Une section regroupe les membres d’une même ville ou d’un même pays. Son trésorier encaisse les cotisations de sa section ; le bureau central voit toutes les sections.</p>
+      ${secs.map(x => { const ms = act.filter(m => m.section_id === x.id), tr = x.treasurer_member_id ? S.ctx.byId.get(x.treasurer_member_id) : null, paid = fee ? ms.filter(m => feeOf(m) > 0 && paidFor(m.id, cur) >= feeOf(m)).length : 0;
+        return `<section class="card stack"><div class="between"><h2>${esc(x.name)}</h2>${mg ? `<a class="link" href="${B()}/sections/${x.id}/modifier">Modifier</a>` : ''}</div>
+          <span class="muted" style="font-size:13.5px">${esc([x.city, x.country].filter(Boolean).join(', ') || '—')}</span>
+          <dl class="kv num" style="margin:0"><dt>Membres</dt><dd>${ms.length}</dd>${fee ? `<dt>À jour ce mois</dt><dd>${paid}/${ms.length}</dd><dt>En retard</dt><dd>${ms.filter(m => dues(m).isLate).length}</dd>` : ''}<dt>Trésorier</dt><dd>${tr ? esc(tr.full_name) : '<span class="muted">Aucun</span>'}</dd></dl>
+          <a class="btn ghost sm" href="${B()}/membres?f=s:${x.id}">Voir les membres</a></section>`; }).join('') || '<div class="empty">Aucune section. Une seule association suffit souvent ; créez des sections si vos membres vivent dans plusieurs villes ou pays.</div>'}
+      ${secs.length ? `<p class="muted" style="font-size:13px">${act.filter(m => !m.section_id).length} membre(s) sans section.</p>` : ''}`;
+  };
+
+  /* Collectes de solidarité ----------------------------------------- */
+  async function colTotals(ids) {
+    if (!ids.length) return new Map();
+    const r = must(await sb.from('v_collection_totals').select('*').in('collection_id', ids));
+    return new Map(r.map(x => [x.collection_id, x]));
+  }
+  const colCard = (c, t, compact) => {
+    const got = Number((t || {}).collected || 0), n = Number((t || {}).contributions || 0), pc = c.goal ? pct(got, c.goal) : 0;
+    return `<a class="card stack col-card ${c.status === 'Ouverte' ? 'open' : ''}" href="${B()}/collecte/${c.id}"><div class="between"><span class="eyebrow">${I.heart} ${esc(c.kind)}</span><span class="pill ${c.status === 'Ouverte' ? 'p-late' : 'p-blue'}">${c.status === 'Ouverte' ? 'En cours' : 'Close'}</span></div>
+      <h2>${esc(c.title)}</h2>${c.beneficiary && !compact ? `<span class="muted" style="font-size:13.5px">Pour ${esc(c.beneficiary)}</span>` : ''}
+      <div class="between num"><b style="font-family:var(--f-display);font-size:20px">${money(got)}</b><span class="muted" style="font-size:13px">${n} contribution${n > 1 ? 's' : ''}${c.goal ? ' · objectif ' + money(c.goal) : ''}</span></div>
+      ${c.goal ? `<div class="bar"><i style="width:${pc}%"></i></div>` : ''}</a>`;
+  };
+  V.collectes = async (sub) => {
+    if (sub[1] === 'nouvelle') return collectionForm(null);
+    const rows = must(await sb.from('collections').select('*').eq('association_id', S.ctx.assoc.id).order('created_at', { ascending: false }).limit(60));
+    const tot = await colTotals(rows.map(c => c.id));
+    const open = rows.filter(c => c.status === 'Ouverte'), closed = rows.filter(c => c.status !== 'Ouverte');
+    return `
+      ${can('collections') ? `<a class="btn primary block" href="${B()}/collectes/nouvelle">${I.plus} Lancer une collecte</a>` : ''}
+      <p class="note">Un décès, une maladie, un mariage : l’association se mobilise. Chaque contribution est enregistrée par le trésorier et visible par tous, jusqu’à la remise à la famille.</p>
+      ${open.map(c => colCard(c, tot.get(c.id))).join('')}
+      ${closed.length ? `<h2>Collectes closes</h2>${closed.map(c => colCard(c, tot.get(c.id), true)).join('')}` : ''}
+      ${rows.length ? '' : '<div class="empty">Aucune collecte pour le moment.</div>'}`;
+  };
+  function collectionForm(c) {
+    if (!can('collections')) return `${subHead('Collecte', B() + '/collectes')}<p class="note">Réservé au bureau.</p>`;
+    const cur = esc(CUR_LABEL[S.ctx.assoc.currency] || S.ctx.assoc.currency);
+    return `${subHead(c ? 'Modifier la collecte' : 'Lancer une collecte', c ? B() + '/collecte/' + c.id : B() + '/collectes')}
+      <form class="stack" data-form="collection" data-id="${c ? c.id : ''}" novalidate>
+        <div class="field"><label for="cl-k">Occasion</label><select id="cl-k" name="kind">${COL_KINDS.map(k => opt(k, k, c ? c.kind : 'Décès')).join('')}</select></div>
+        <div class="field"><label for="cl-t">Titre</label><input id="cl-t" name="title" maxlength="160" value="${esc(c && c.title)}" placeholder="Ex. Soutien à la famille de Thierno Bah" required></div>
+        <div class="field"><label for="cl-b">Pour qui</label><input id="cl-b" name="beneficiary" maxlength="160" value="${esc(c && c.beneficiary)}" placeholder="Ex. la famille de Thierno Bah, à Kansaghel"></div>
+        <div class="row2"><div class="field"><label for="cl-s">Participation conseillée (${cur})</label><input id="cl-s" name="suggested" type="number" inputmode="numeric" min="1" step="1" value="${esc(c && c.suggested)}" placeholder="Libre"></div>
+        <div class="field"><label for="cl-g">Objectif (${cur})</label><input id="cl-g" name="goal" type="number" inputmode="numeric" min="1" step="1" value="${esc(c && c.goal)}" placeholder="Aucun"></div></div>
+        <div class="field"><label for="cl-e">Date limite (facultatif)</label><input id="cl-e" name="ends_on" type="date" value="${esc(c && c.ends_on)}"></div>
+        <div class="field"><label for="cl-d">Message aux membres</label><textarea id="cl-d" name="description" rows="4" maxlength="2000" placeholder="Ex. Nous avons appris avec tristesse le décès de… Que chacun participe selon ses moyens.">${esc(c && c.description)}</textarea></div>
+        <p class="err" hidden></p><button class="btn primary block" type="submit">${c ? 'Enregistrer' : 'Lancer la collecte'}</button></form>`;
+  }
+  V.collecte = async (sub) => {
+    const c = must(await sb.from('collections').select('*').eq('association_id', S.ctx.assoc.id).eq('id', sub[1]).maybeSingle());
+    if (!c) return subHead('Collecte introuvable', B() + '/collectes');
+    if (sub[2] === 'modifier') return collectionForm(c);
+    const ops = must(await sb.from('transactions').select('*').eq('association_id', S.ctx.assoc.id).eq('collection_id', c.id).order('id', { ascending: false }).limit(300));
+    const rset = await reversedSet(ops);
+    const t = (await colTotals([c.id])).get(c.id) || { collected: 0, given: 0, contributions: 0 };
+    const got = Number(t.collected), given = Number(t.given), open = c.status === 'Ouverte';
+    const tres = activeMembers().find(m => m.role === 'tresorier' && m.phone);
+    const share = `🤲 ${c.title}\n${c.beneficiary ? 'Pour ' + c.beneficiary + '\n' : ''}${c.description ? '\n' + c.description + '\n' : ''}\nDéjà collecté : ${money(got)} (${t.contributions} contributions)${c.goal ? ' sur ' + money(c.goal) : ''}${c.suggested ? '\nParticipation conseillée : ' + money(c.suggested) : ''}${tres ? '\nVersez auprès du trésorier : ' + tres.full_name + ' (' + tres.phone + ')' : ''}\n\nChaque contribution est visible par tous dans VillageLink.`;
+    const mine = S.ctx.me && ops.some(o => o.member_id === S.ctx.me.id && o.kind === 'in' && !o.reversal_of && !rset.has(o.id));
+    return `${subHead('Collecte', B() + '/collectes')}
+      <section class="card hero col-hero"><div class="eyebrow">${I.heart} ${esc(c.kind)}${open ? '' : ' · close'}</div><h2 style="color:inherit">${esc(c.title)}</h2>${c.beneficiary ? `<span style="opacity:.85">Pour ${esc(c.beneficiary)}</span>` : ''}
+        <div class="big num">${num(got)} <span class="cur">${esc(CUR_LABEL[S.ctx.assoc.currency] || '')}</span></div>
+        ${c.goal ? `<div class="bar"><i style="width:${pct(got, c.goal)}%"></i></div>` : ''}
+        <div class="boxes num"><div><small>Contributions</small><b>${t.contributions}</b></div><div><small>Remis</small><b>${money(given)}</b></div></div></section>
+      ${c.description ? `<p class="card" style="white-space:pre-line;margin:0">${esc(c.description)}</p>` : ''}
+      <dl class="kv num card" style="margin:0">${c.suggested ? `<dt>Participation conseillée</dt><dd>${money(c.suggested)}</dd>` : ''}${c.goal ? `<dt>Objectif</dt><dd>${money(c.goal)}</dd>` : ''}${c.ends_on ? `<dt>Jusqu’au</dt><dd>${dFR(c.ends_on)}</dd>` : ''}<dt>Lancée par</dt><dd>${esc(c.created_label)}</dd><dt>Le</dt><dd>${dFR(c.created_at)}</dd>${c.closed_at ? `<dt>Close le</dt><dd>${dFR(c.closed_at)}</dd>` : ''}</dl>
+      <div class="stack" style="gap:10px">
+        ${open && can('collect') ? `<a class="btn primary block" href="${B()}/operation?type=in&collecte=${c.id}">${I.plus} Enregistrer une contribution</a>` : ''}
+        ${open && !can('collect') && tres ? `<a class="btn primary block" target="_blank" rel="noopener" href="${waTo(tres.phone, 'Salam ' + tres.full_name + ', je participe à la collecte « ' + c.title + ' ». Comment vous envoyer ma contribution ?')}">${I.wa} ${mine ? 'Participer encore' : 'Je participe'}</a>` : ''}
+        <a class="btn wa block" target="_blank" rel="noopener" href="${waShare(share)}">${I.wa} Partager l’appel sur WhatsApp</a>
+        ${can('spend') && got - given > 0 ? `<a class="btn ghost block" href="${B()}/operation?type=out&collecte=${c.id}">Remettre l’argent à la famille</a>` : ''}
+        ${can('collections') ? `<div class="row" style="flex-wrap:wrap"><a class="btn ghost sm" href="${B()}/collecte/${c.id}/modifier">Modifier</a>${open ? `<button class="btn danger sm" data-act="colstatus" data-id="${c.id}" data-status="Close">Clore la collecte</button>` : `<button class="btn ghost sm" data-act="colstatus" data-id="${c.id}" data-status="Ouverte">Rouvrir</button>`}</div>` : ''}
+      </div>
+      <h2>Contributions et remises</h2>
+      <div class="list">${ops.map(o => txItem(o, rset)).join('') || '<div class="empty">Aucune contribution pour le moment.</div>'}</div>`;
+  };
+
+  /* Double validation des dépenses ----------------------------------- */
+  const EXP_PILL = { 'En attente': 'p-late', 'Approuvée': 'p-ok', 'Refusée': 'p-red', 'Annulée': 'p-blue' };
+  V.depenses = async (sub, q) => {
+    const f = q.get('f') === 'tout' ? 'tout' : 'attente';
+    let qy = sb.from('expense_requests').select('*').eq('association_id', S.ctx.assoc.id);
+    if (f === 'attente') qy = qy.eq('status', 'En attente');
+    const rows = must(await qy.order('id', { ascending: false }).limit(60));
+    return `${subHead('Dépenses à valider', B() + '/finances')}
+      <p class="note">${S.ctx.assoc.expense_approval ? 'Double validation active : le trésorier propose, le président ou le vice-président approuve. Une dépense n’entre dans la caisse qu’après approbation.' : 'La double validation est désactivée : le trésorier enregistre les dépenses directement.'}</p>
+      <div class="chips" role="group" aria-label="Filtrer"><a class="chip" style="text-decoration:none" href="${B()}/depenses" aria-pressed="${f === 'attente'}">En attente (${S.ctx.expPending})</a><a class="chip" style="text-decoration:none" href="${B()}/depenses?f=tout" aria-pressed="${f === 'tout'}">Historique</a></div>
+      <div class="list">${rows.map(r => `<a class="item" href="${B()}/depense/${r.id}"><div class="body"><div class="t">${esc(r.description)}</div><div class="s wrap">${dFR(r.created_at)} · ${esc(r.category)} · <span class="pill ${EXP_PILL[r.status]}">${esc(r.status)}</span></div></div><span class="amt num out">−${money(r.amount)}</span></a>`).join('') || `<div class="empty">${f === 'attente' ? 'Aucune dépense en attente.' : 'Aucune proposition de dépense.'}</div>`}</div>`;
+  };
+  V.depense = async (sub) => {
+    const r = must(await sb.from('expense_requests').select('*').eq('association_id', S.ctx.assoc.id).eq('id', Number(sub[1])).maybeSingle());
+    if (!r) return subHead('Dépense introuvable', B() + '/depenses');
+    const proj = r.project_id ? must(await sb.from('projects').select('id,name').eq('id', r.project_id).maybeSingle()) : null;
+    const pending = r.status === 'En attente', mine = r.requested_by === S.user.id, solde = S.ctx.bal.in - S.ctx.bal.out;
+    return `${subHead('Proposition de dépense', B() + '/depenses')}
+      <section class="card stack num"><div class="between"><span class="pill ${EXP_PILL[r.status]}">${esc(r.status)}</span><span class="amt out" style="font-size:18px">−${money(r.amount)}</span></div>
+        <dl class="kv" style="margin:0"><dt>Objet</dt><dd>${esc(r.description)}</dd>${r.orig_currency ? `<dt>Montant payé</dt><dd>${origTag(r)} (1 ${esc(CUR_LABEL[r.orig_currency] || r.orig_currency)} = ${rateFmt(r.fx_rate)})</dd>` : ''}<dt>Catégorie</dt><dd>${esc(r.category)}</dd>${proj ? `<dt>Projet</dt><dd>${esc(proj.name)}</dd>` : ''}<dt>Date</dt><dd>${dFR(r.occurred_on)}</dd><dt>Proposé par</dt><dd>${esc(r.requested_label)}</dd><dt>Le</dt><dd>${dFR(r.created_at)} à ${hm(r.created_at)}</dd>${r.comment ? `<dt>Commentaire</dt><dd>${esc(r.comment)}</dd>` : ''}${r.decided_at ? `<dt>${r.status === 'Annulée' ? 'Retiré par' : r.status === 'Approuvée' ? 'Approuvé par' : 'Refusé par'}</dt><dd>${esc(r.decided_label)}, le ${dFR(r.decided_at)}</dd>` : ''}${r.decision_note ? `<dt>Motif</dt><dd>${esc(r.decision_note)}</dd>` : ''}</dl>
+        ${r.proof_path ? `<button class="btn ghost sm" data-act="proof" data-path="${esc(r.proof_path)}">Voir le justificatif</button><div id="proof-box"></div>` : '<span class="muted" style="font-size:13px">Aucun justificatif joint</span>'}</section>
+      ${r.tx_id ? `<a class="btn ghost block" href="${B()}/op/${r.tx_id}">Voir l’opération dans la caisse</a>` : ''}
+      ${pending && can('approve') && !mine ? `<section class="card stack"><h2>Votre décision</h2><p class="muted num" style="margin:0;font-size:13.5px">Solde actuel de la caisse : ${money(solde)}${r.amount > solde ? ' : <b style="color:var(--danger)">insuffisant pour cette dépense</b>' : ''}.</p>
+        <button class="btn primary block" data-act="approveexp" data-id="${r.id}" ${r.amount > solde ? 'disabled' : ''}>Approuver la dépense</button></section>
+        <form class="card stack" data-form="rejectexp" data-id="${r.id}" novalidate><h2>Refuser</h2><div class="field"><label for="rj-r">Motif du refus</label><input id="rj-r" name="reason" placeholder="Ex. demander un deuxième devis"></div><p class="err" hidden></p><button class="btn danger block" type="submit">Refuser la dépense</button></form>` : ''}
+      ${pending && mine ? `<p class="note">En attente de l’approbation du président ou du vice-président. Prévenez-les sur WhatsApp.</p><button class="btn ghost block" data-act="cancelexp" data-id="${r.id}">Retirer ma proposition</button>` : ''}
+      ${pending && !mine && !can('approve') ? '<p class="note">En attente de l’approbation du président ou du vice-président.</p>' : ''}`;
+  };
+
+  /* Transparence ----------------------------------------------------- */
+  V.transparence = async () => {
+    const a = S.ctx.assoc;
+    const [cats, projects, totals, recent] = await Promise.all([
+      sb.from('v_category_totals').select('*').eq('association_id', a.id).then(must),
+      sb.from('projects').select('*').eq('association_id', a.id).order('created_at', { ascending: false }).then(must),
+      sb.from('v_project_totals').select('*').then(must),
+      sb.from('transactions').select('*').eq('association_id', a.id).neq('category', 'Cotisations').order('occurred_on', { ascending: false }).order('id', { ascending: false }).limit(10).then(must)
+    ]);
+    const tot = new Map(totals.map(x => [x.project_id, x]));
+    const rset = await reversedSet(recent);
+    const bal = S.ctx.bal;
+    const bars = (kind, total) => cats.filter(c => c.kind === kind && Number(c.total) > 0).sort((x, y) => y.total - x.total).map(c => `<div class="catbar ${kind}"><span>${esc(c.category)}</span><div class="bar"><i style="width:${Math.max(2, pct(c.total, total))}%"></i></div><span class="num" style="font-weight:600">${num(c.total)}</span></div>`).join('') || '<span class="muted">Rien pour le moment.</span>';
+    return `
+      <section class="card hero"><div class="eyebrow">Solde disponible</div><div class="big num">${money(bal.in - bal.out)}</div><div class="split num"><span>Recettes <b>${money(bal.in)}</b></span><span>Dépenses <b>${money(bal.out)}</b></span></div></section>
+      <section class="card stack"><div class="between"><h2>Recettes</h2><span class="muted num">${money(bal.in)}</span></div>${bars('in', bal.in)}</section>
+      <section class="card stack"><div class="between"><h2>Dépenses</h2><span class="muted num">${money(bal.out)}</span></div>${bars('out', bal.out)}</section>
+      ${projects.length ? `<section class="card stack"><h2>Projets</h2>${projects.map(p => { const t = tot.get(p.id) || { collected: 0, spent: 0 }; return `<a class="item" href="${B()}/p/${p.id}" style="padding:8px 0"><div class="body"><div class="t">${esc(p.name)}</div><div class="s wrap num">Collecté ${money(t.collected)} · dépensé ${money(t.spent)}</div></div><span class="pill ${p.status === 'Terminé' ? 'p-blue' : 'p-ok'}">${esc(p.status)}</span></a>`; }).join('')}</section>` : ''}
+      <p class="note">Chaque opération est datée et signée par la personne qui l’a saisie. Aucune opération ne peut être modifiée ni supprimée : une erreur se corrige par une contre-écriture, visible ici par tous les membres.</p>
+      <div class="between"><h2>Dernières opérations</h2><a class="link" href="${B()}/finances?f=hors">Tout voir</a></div>
+      <div class="list">${recent.map(t => txItem(t, rset)).join('') || '<div class="empty">Aucune opération hors cotisations.</div>'}</div>
+      <a class="todo" href="${B()}/rapport"><span class="ico-tile">${I.report}</span><span class="body" style="flex:1"><span class="tt" style="display:block">Rapport mensuel</span><span class="ss" style="display:block">Le bilan du mois, en PDF ou sur WhatsApp</span></span><span class="chev">${I.chev}</span></a>
+      <a class="todo" href="${B()}/journal"><span class="ico-tile">${I.clock}</span><span class="body" style="flex:1"><span class="tt" style="display:block">Journal d’activité</span><span class="ss" style="display:block">Qui a fait quoi, et quand. Non modifiable.</span></span><span class="chev">${I.chev}</span></a>`;
+  };
+
+  /* Projets ---------------------------------------------------------- */
+  V.projets = async (sub) => {
+    if (sub[1] === 'nouveau') return projectForm(null);
+    const a = S.ctx.assoc;
+    const [projects, totals] = await Promise.all([
+      sb.from('projects').select('*').eq('association_id', a.id).order('created_at', { ascending: false }).then(must),
+      sb.from('v_project_totals').select('*').then(must)
+    ]);
+    const tot = new Map(totals.map(x => [x.project_id, x]));
+    return `<div class="between"><h2>Projets du village</h2>${can('projects') ? `<a class="btn primary sm" href="${B()}/projets/nouveau">+ Projet</a>` : ''}</div>
+      ${projects.map(p => { const t = tot.get(p.id) || { collected: 0 }; const pc = pct(t.collected, p.goal); return `<a class="card stack" href="${B()}/p/${p.id}"><div class="between"><span class="eyebrow">${esc(p.type)}</span><span class="pill ${p.status === 'Terminé' ? 'p-blue' : p.status === 'Suspendu' ? 'p-late' : 'p-ok'}">${esc(p.status)}</span></div><h2>${esc(p.name)}</h2>
+        <div class="between"><span class="pct num">${pc}${NB}%</span><span class="muted num" style="font-size:13px">${money(t.collected)} / ${money(p.goal)}</span></div><div class="bar"><i style="width:${pc}%"></i></div>
+        <span class="muted" style="font-size:13px">${p.lead_member_id ? 'Responsable : ' + esc(memberName(p.lead_member_id)) + ' · ' : ''}${p.end_on ? 'fin prévue ' + dFR(p.end_on) : 'début ' + dFR(p.start_on)}</span></a>`; }).join('') || `<div class="empty">Aucun projet pour le moment.${can('projects') ? '' : ' Le président ou le responsable des projets peut en créer un.'}</div>`}`;
+  };
+
+  function projectForm(p) {
+    if (!can('projects')) return `${subHead('Projet', B() + '/projets')}<p class="note">Réservé au président et au responsable des projets.</p>`;
+    const bureau = activeMembers().filter(m => m.role !== 'membre');
+    return `${subHead(p ? 'Modifier le projet' : 'Nouveau projet', p ? B() + '/p/' + p.id : B() + '/projets')}
+      <form class="stack" data-form="project" data-id="${p ? p.id : ''}" novalidate>
+        <div class="field"><label for="pj-n">Nom du projet</label><input id="pj-n" name="name" value="${esc(p && p.name)}" placeholder="Ex. Forage du quartier haut" required></div>
+        <div class="row2"><div class="field"><label for="pj-t">Type</label><select id="pj-t" name="type">${PROJECT_TYPES.map(x => opt(x, x, p && p.type)).join('')}</select></div>
+        <div class="field"><label for="pj-g">Objectif (${esc(CUR_LABEL[S.ctx.assoc.currency] || '')})</label><input id="pj-g" name="goal" type="number" inputmode="numeric" min="1" step="1" value="${esc(p && p.goal)}" required></div></div>
+        <div class="field"><label for="pj-l">Responsable</label><select id="pj-l" name="lead_member_id"><option value="">À désigner</option>${bureau.map(m => opt(m.id, m.full_name + ' · ' + ROLES[m.role], p ? p.lead_member_id : '')).join('')}</select></div>
+        <div class="row2"><div class="field"><label for="pj-s">Début</label><input id="pj-s" name="start_on" type="date" value="${esc(p ? p.start_on : todayISO())}"></div><div class="field"><label for="pj-e">Fin prévue</label><input id="pj-e" name="end_on" type="date" value="${esc(p && p.end_on)}"></div></div>
+        ${p ? `<div class="field"><label for="pj-st">Statut</label><select id="pj-st" name="status">${STATUSES.map(x => opt(x, x, p.status)).join('')}</select></div>` : ''}
+        <div class="field"><label for="pj-d">Description</label><textarea id="pj-d" name="description" rows="4" placeholder="Ce que le projet va réaliser au village">${esc(p && p.description)}</textarea></div>
+        <p class="err" hidden></p><button class="btn primary block" type="submit">${p ? 'Enregistrer' : 'Créer le projet'}</button></form>`;
+  }
+
+  V.p = async (sub) => {
+    const a = S.ctx.assoc;
+    const p = must(await sb.from('projects').select('*').eq('association_id', a.id).eq('id', sub[1]).maybeSingle());
+    if (!p) return `${subHead('Projet introuvable', B() + '/projets')}`;
+    if (sub[2] === 'modifier') return projectForm(p);
+    const [tt, updates, ops] = await Promise.all([
+      sb.from('v_project_totals').select('*').eq('project_id', p.id).maybeSingle().then(must),
+      sb.from('project_updates').select('*').eq('project_id', p.id).order('created_at', { ascending: false }).limit(50).then(must),
+      sb.from('transactions').select('*').eq('project_id', p.id).order('occurred_on', { ascending: false }).order('id', { ascending: false }).limit(60).then(must)
+    ]);
+    const t = tt || { collected: 0, spent: 0 }, c = Number(t.collected), s = Number(t.spent), pc = pct(c, p.goal);
+    const rset = await reversedSet(ops);
+    const by = uid => { const m = S.ctx.members.find(x => x.user_id && x.user_id === uid); return m ? m.full_name : '—'; };
+    const share = `${p.name}\nObjectif : ${money(p.goal)}\nCollecté : ${money(c)} (${pc} %)\nReste : ${money(Math.max(0, p.goal - c))}\n\n${a.name}`;
+    return `${subHead(esc(p.type), B() + '/projets')}
+      <h2 style="font-size:22px">${esc(p.name)}</h2>${p.description ? `<p style="margin:0" class="muted">${esc(p.description)}</p>` : ''}
+      <section class="card stack"><div class="between"><span class="pct num">${pc}${NB}%</span><span class="pill ${p.status === 'Terminé' ? 'p-blue' : 'p-ok'}">${esc(p.status)}</span></div><div class="bar"><i style="width:${pc}%"></i></div>
+        <dl class="kv num" style="margin:0"><dt>Objectif</dt><dd>${money(p.goal)}</dd><dt>Collecté</dt><dd style="color:var(--green)">${money(c)}</dd><dt>Dépensé</dt><dd style="color:var(--danger)">${money(s)}</dd><dt>Reste à collecter</dt><dd>${money(Math.max(0, p.goal - c))}</dd><dt>En caisse pour ce projet</dt><dd>${money(c - s)}</dd></dl></section>
+      <section class="card"><dl class="kv" style="margin:0"><dt>Responsable</dt><dd>${p.lead_member_id ? esc(memberName(p.lead_member_id)) : '<span class="muted">À désigner</span>'}</dd><dt>Début</dt><dd>${dFR(p.start_on)}</dd><dt>Fin prévue</dt><dd>${p.end_on ? dFR(p.end_on) : '<span class="muted">—</span>'}</dd></dl></section>
+      <div class="row" style="flex-wrap:wrap">${can('collect') && p.status !== 'Terminé' ? `<a class="btn primary sm" href="${B()}/operation?type=in&projet=${p.id}">+ Contribution</a>` : ''}${can('spend') && p.status !== 'Terminé' ? `<a class="btn ghost sm" href="${B()}/operation?type=out&projet=${p.id}">+ Dépense</a>` : ''}${can('projects') ? `<a class="btn ghost sm" href="${B()}/p/${p.id}/modifier">Modifier</a>` : ''}<a class="btn wa sm" target="_blank" rel="noopener" href="${waShare(share)}">${I.wa} Partager</a></div>
+      ${pubCard(p, c, pc)}
+      ${can('projects') ? `<form class="card stack" data-form="pupdate" data-id="${p.id}" novalidate><h2>Donner des nouvelles</h2><div class="field"><label for="pu-t">Ce qui a avancé</label><textarea id="pu-t" name="body" rows="3" placeholder="Ex. le château d’eau est monté, il reste la pompe solaire"></textarea></div><p class="err" hidden></p><button class="btn primary" type="submit">Publier</button></form>` : ''}
+      <section class="stack"><span class="eyebrow">Mises à jour</span>${updates.length ? `<div class="timeline">${updates.map(u => `<div><div class="d">${dFR(u.created_at)} · ${esc(by(u.created_by))}</div><div>${esc(u.body)}</div></div>`).join('')}</div>` : '<span class="muted">Aucune mise à jour pour le moment.</span>'}</section>
+      <section class="stack"><span class="eyebrow">Opérations du projet</span><div class="list">${ops.map(x => txItem(x, rset)).join('') || '<div class="empty">Aucune opération.</div>'}</div></section>`;
+  };
+
+  const pubUrl = p => location.origin + location.pathname.replace(/[^/]*$/, '') + 'projet.html?id=' + p.public_slug;
+  function pubCard(p, c, pc) {
+    if (p.public_slug) {
+      const url = pubUrl(p), share = `${p.name} — ${S.ctx.assoc.name}\nDéjà ${money(c)} collectés sur ${money(p.goal)} (${pc} %).\nSuivez le projet en toute transparence, et participez :\n${url}`;
+      return `<section class="card stack pub-card"><div class="between"><h2>Page publique</h2><span class="pill p-ok">En ligne</span></div>
+        <p class="muted" style="margin:0;font-size:13.5px">Tout le monde peut voir ce projet avec ce lien, même sans compte : objectif, argent collecté, dépenses et nouvelles. Aucun nom ni numéro de membre n’y apparaît.</p>
+        <a class="link" style="word-break:break-all" target="_blank" rel="noopener" href="${esc(url)}">${esc(url)}</a>
+        <a class="btn wa block" target="_blank" rel="noopener" href="${waShare(share)}">${I.wa} Partager la page sur WhatsApp</a>
+        ${can('projects') ? `<form class="stack" data-form="ppublic" data-id="${p.id}" data-on="1" novalidate><div class="field"><label for="pp-c">Comment donner (affiché sur la page)</label><input id="pp-c" name="contact" maxlength="300" value="${esc(p.public_contact)}" placeholder="Ex. Wave ou Orange Money au +221 77 000 00 00 (trésorier)"></div><p class="err" hidden></p><button class="btn ghost sm" type="submit">Enregistrer</button></form>
+        <button class="btn danger sm" data-act="unpublish" data-id="${p.id}">Retirer la page publique</button>` : ''}</section>`;
+    }
+    if (!can('projects')) return '';
+    return `<form class="card stack" data-form="ppublic" data-id="${p.id}" novalidate><h2>Faire connaître le projet</h2>
+      <p class="muted" style="margin:0;font-size:13.5px">Publiez une page ouverte à tous, à partager sur Facebook et WhatsApp : la diaspora et les amis du village voient l’avancement et peuvent donner. Aucune donnée de membre n’y apparaît.</p>
+      <div class="field"><label for="pp-c">Comment donner</label><input id="pp-c" name="contact" maxlength="300" placeholder="Ex. Wave ou Orange Money au +221 77 000 00 00 (trésorier)"><p class="help">Ce texte sera visible par tout le monde. Mettez un numéro qui accepte d’être public.</p></div>
+      <p class="err" hidden></p><button class="btn primary block" type="submit">Publier la page du projet</button></form>`;
+  }
+
+  /* Annonces, journal, plus, paramètres ------------------------------ */
+  V.annonces = async () => {
+    const a = S.ctx.assoc;
+    const rows = must(await sb.from('announcements').select('*').eq('association_id', a.id).order('created_at', { ascending: false }).limit(50));
+    const col = { Urgence: 'p-red', Convocation: 'p-late', 'Nouvelles du village': 'p-ok', Information: 'p-blue', Annonce: 'p-blue' };
+    const by = uid => { const m = S.ctx.members.find(x => x.user_id && x.user_id === uid); return m ? m.full_name : '—'; };
+    return `${subHead('Annonces', B() + '/vie')}
+      ${can('announce') ? `<form class="card stack" data-form="announce" novalidate><h2>Publier une annonce</h2>
+        <div class="field"><label for="an-k">Type</label><select id="an-k" name="kind">${ANN_KINDS.map(k => opt(k, k)).join('')}</select></div>
+        <div class="field"><label for="an-t">Titre</label><input id="an-t" name="title" maxlength="160"></div>
+        <div class="field"><label for="an-b">Message</label><textarea id="an-b" name="body" rows="4" placeholder="Écrivez, ou enregistrez l’annonce en vocal"></textarea></div>
+        ${voiceBox('ann')}
+        <p class="err" hidden></p><button class="btn primary" type="submit">Publier</button><p class="help">Pensez à la partager dans le groupe WhatsApp après publication.</p></form>` : ''}
+      ${rows.map(x => `<section class="card stack"><div class="between"><span class="pill ${col[x.kind] || 'p-blue'}">${esc(x.kind)}</span><span class="muted" style="font-size:13px">${dFR(x.created_at)}</span></div><h2>${esc(x.title)}</h2>${x.audio_path && x.body === 'Annonce vocale' ? '' : `<p style="margin:0;white-space:pre-line">${esc(x.body)}</p>`}${voicePlay(x.audio_path, x.audio_seconds)}<div class="between"><span class="muted" style="font-size:13px">${esc(by(x.created_by))}</span><a class="link" target="_blank" rel="noopener" href="${waShare(x.kind + ' · ' + x.title + '\n\n' + x.body + '\n\n' + a.name)}">Partager sur WhatsApp</a></div></section>`).join('') || '<div class="empty">Aucune annonce pour le moment.</div>'}`;
+  };
+
+  /* Réunions --------------------------------------------------------- */
+  const MEET_PILL = { Prévue: 'p-blue', Tenue: 'p-ok', Annulée: 'p-red' };
+  const dateBox = ts => { const x = new Date(ts); return `<span class="datebox" aria-hidden="true"><small>${MOIS[x.getMonth()].replace('.', '')}</small><b>${x.getDate()}</b></span>`; };
+  const appLink = path => location.origin + location.pathname + '#' + path;
+  const convText = m => `CONVOCATION · ${S.ctx.assoc.name}\n\n${m.title}\nDate : ${dLong(m.starts_at)}${m.place ? '\nLieu : ' + m.place : ''}${m.agenda ? '\n\nOrdre du jour :\n' + m.agenda : ''}\n\nVotre présence est importante.\n${appLink('/a/' + S.ctx.assoc.id + '/r/' + m.id)}`;
+  const meetItem = m => `<a class="card meet-row" href="${B()}/r/${m.id}">${dateBox(m.starts_at)}<span class="body"><b>${esc(m.title)}</b><span class="muted">${esc(hm(m.starts_at))}${m.place ? ' · ' + esc(m.place) : ''}</span></span><span class="pill ${MEET_PILL[m.status]}">${esc(m.status)}</span></a>`;
+
+  V.reunions = async (sub) => {
+    if (sub[1] === 'nouvelle') return meetingForm(null);
+    const a = S.ctx.assoc;
+    const res = await sb.from('meetings').select('*').eq('association_id', a.id).order('starts_at', { ascending: false }).limit(100);
+    if (res.error) return `${subHead('Réunions', B() + '/vie')}<p class="note">Les réunions ne sont pas encore installées sur la base.</p>`;
+    const limit = Date.now() - 6 * 3600e3;
+    const next = res.data.filter(m => m.status === 'Prévue' && new Date(m.starts_at).getTime() >= limit).reverse();
+    const past = res.data.filter(m => !next.includes(m));
+    return `<div class="subhead between" style="margin-left:-8px"><span class="row" style="gap:6px"><a class="iconbtn" href="${B()}/vie" aria-label="Retour">${I.back}</a><h1>Réunions</h1></span>${can('meetings') ? `<a class="btn primary sm" href="${B()}/reunions/nouvelle">+ Convoquer</a>` : ''}</div>
+      <section class="stack"><h2>À venir</h2>${next.map(meetItem).join('') || `<div class="empty">Aucune réunion prévue.${can('meetings') ? ' Convoquez la prochaine avec le bouton « + Convoquer ».' : ''}</div>`}</section>
+      ${past.length ? `<section class="stack"><h2>Passées</h2>${past.map(meetItem).join('')}</section>` : ''}`;
+  };
+
+  function meetingForm(m) {
+    if (!can('meetings')) return `${subHead('Réunion', B() + '/reunions')}<p class="note">Réservé au président, au vice-président et au secrétaire général.</p>`;
+    const d = m ? new Date(m.starts_at) : null;
+    const dv = d ? `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` : '', tv = d ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : '16:00';
+    return `${subHead(m ? 'Modifier la convocation' : 'Convoquer une réunion', m ? B() + '/r/' + m.id : B() + '/reunions')}
+      <form class="stack" data-form="meeting" data-id="${m ? m.id : ''}" novalidate>
+        <div class="field"><label for="mt-t">Titre</label><input id="mt-t" name="title" maxlength="160" value="${esc(m ? m.title : 'Assemblée générale')}" required></div>
+        <div class="row2"><div class="field"><label for="mt-d">Date</label><input id="mt-d" name="date" type="date" value="${esc(dv)}" required></div><div class="field"><label for="mt-h">Heure</label><input id="mt-h" name="time" type="time" value="${esc(tv)}" required></div></div>
+        <div class="field"><label for="mt-p">Lieu</label><input id="mt-p" name="place" maxlength="200" value="${esc(m && m.place)}" placeholder="Ex. chez le président, à Pikine"></div>
+        <div class="field"><label for="mt-a">Ordre du jour</label><textarea id="mt-a" name="agenda" rows="5" maxlength="4000" placeholder="Un point par ligne&#10;Ex. Bilan des cotisations&#10;Projet forage">${esc(m && m.agenda)}</textarea></div>
+        <p class="err" hidden></p><button class="btn primary block" type="submit">${m ? 'Enregistrer' : 'Convoquer'}</button>
+        ${m ? '' : '<p class="help">Après la convocation, partagez-la dans le groupe WhatsApp de l’association.</p>'}</form>`;
+  }
+
+  V.r = async (sub) => {
+    const a = S.ctx.assoc;
+    const m = must(await sb.from('meetings').select('*').eq('association_id', a.id).eq('id', sub[1]).maybeSingle());
+    if (!m) return `${subHead('Réunion introuvable', B() + '/reunions')}`;
+    if (sub[2] === 'modifier') return meetingForm(m);
+    const att = must(await sb.from('meeting_attendance').select('*').eq('meeting_id', m.id));
+    if (sub[2] === 'presence') return attendanceView(m, att);
+    if (sub[2] === 'compte-rendu') return minutesForm(m);
+    const pres = att.filter(x => x.present), abs = att.filter(x => !x.present);
+    const crText = `Compte rendu · ${m.title}\n${dLong(m.starts_at)}${m.place ? ' · ' + m.place : ''}\nPrésents : ${pres.length}\n\n${m.minutes}\n\n${a.name}`;
+    const mg = can('meetings');
+    return `${subHead('Réunion', B() + '/reunions')}
+      <section class="card stack"><div class="between"><span class="pill ${MEET_PILL[m.status]}">${esc(m.status)}</span><span class="muted" style="font-size:13px">Convoquée par ${esc(String(m.created_label || '').replace(/\s*\(.*\)$/, '') || '—')}</span></div>
+        <h2 style="font-size:22px">${esc(m.title)}</h2>
+        <dl class="kv" style="margin:0"><dt>Date</dt><dd>${esc(dLong(m.starts_at))}</dd>${m.place ? `<dt>Lieu</dt><dd>${esc(m.place)}</dd>` : ''}</dl>
+        ${m.agenda ? `<div class="stack" style="gap:4px"><span class="eyebrow">Ordre du jour</span><p style="margin:0;white-space:pre-line">${esc(m.agenda)}</p></div>` : ''}</section>
+      <div class="row" style="flex-wrap:wrap">${m.status !== 'Annulée' ? `<a class="btn wa sm" target="_blank" rel="noopener" href="${waShare(convText(m))}">${I.wa} Envoyer la convocation</a>` : ''}${mg ? `<a class="btn ghost sm" href="${B()}/r/${m.id}/modifier">Modifier</a>` : ''}</div>
+      <section class="card stack"><div class="between"><h2>Présence</h2>${mg && m.status !== 'Annulée' ? `<a class="btn primary sm" href="${B()}/r/${m.id}/presence">Faire l’appel</a>` : ''}</div>
+        ${att.length ? `<div class="row num" style="gap:8px;flex-wrap:wrap"><span class="pill p-ok">${pres.length} présent${pres.length > 1 ? 's' : ''}</span><span class="pill p-late">${abs.length} absent${abs.length > 1 ? 's' : ''}</span></div>
+          ${pres.length ? `<p style="margin:0" class="muted">${pres.map(x => esc(memberName(x.member_id))).join(', ')}</p>` : ''}` : `<span class="muted">${m.status === 'Prévue' ? 'L’appel se fait le jour de la réunion.' : 'Aucune présence enregistrée.'}</span>`}</section>
+      <section class="card stack"><div class="between"><h2>Compte rendu</h2>${mg && m.status !== 'Annulée' ? `<a class="btn ${m.minutes ? 'ghost' : 'primary'} sm" href="${B()}/r/${m.id}/compte-rendu">${m.minutes ? 'Modifier' : 'Rédiger'}</a>` : ''}</div>
+        ${m.minutes ? `<p style="margin:0;white-space:pre-line">${esc(m.minutes)}</p><a class="link" target="_blank" rel="noopener" href="${waShare(crText)}">Partager le compte rendu sur WhatsApp</a>` : `<span class="muted">${m.status === 'Annulée' ? 'Réunion annulée.' : 'Pas encore de compte rendu.'}</span>`}</section>
+      ${mg && m.status === 'Prévue' ? `<div class="row" style="flex-wrap:wrap"><button class="btn ghost sm" data-act="meetstatus" data-id="${m.id}" data-status="Tenue">Marquer comme tenue</button><button class="btn danger sm" data-act="meetstatus" data-id="${m.id}" data-status="Annulée">Annuler la réunion</button></div>` : ''}
+      ${mg && m.status !== 'Prévue' ? `<button class="link" data-act="meetstatus" data-id="${m.id}" data-status="Prévue">Remettre en « Prévue »</button>` : ''}`;
+  };
+
+  function attendanceView(m, att) {
+    if (!can('meetings')) return `${subHead('Présence', B() + '/r/' + m.id)}<p class="note">Réservé au président, au vice-président et au secrétaire général.</p>`;
+    const st = new Map(att.map(x => [x.member_id, x.present]));
+    const list = activeMembers().slice().sort((x, y) => x.full_name.localeCompare(y.full_name, 'fr'));
+    const btn = (id, v, l) => `<button class="btn sm att ${v ? 'att-yes' : 'att-no'}" data-act="attend" data-meet="${m.id}" data-id="${id}" data-v="${v ? 1 : 0}" aria-pressed="${st.get(id) === v}">${l}</button>`;
+    return `${subHead('Faire l’appel', B() + '/r/' + m.id)}
+      <p class="muted" style="margin:0">${esc(m.title)} · ${esc(dLong(m.starts_at))}</p>
+      <div class="row num" id="att-count" style="gap:8px;flex-wrap:wrap">${attCount(att)}</div>
+      <div class="list" id="att-list">${list.map(x => `<div class="item" data-mid="${x.id}"><div class="av">${esc(initials(x.full_name))}</div><div class="body"><div class="t">${esc(x.full_name)}</div><div class="s">${esc(ROLES[x.role])}</div></div><div class="row" style="gap:6px">${btn(x.id, true, 'Présent')}${btn(x.id, false, 'Absent')}</div></div>`).join('') || '<div class="empty">Aucun membre actif.</div>'}</div>
+      <a class="btn primary block" href="${B()}/r/${m.id}">Terminer</a>
+      <p class="help">Chaque choix est enregistré tout de suite. Touchez à nouveau le même bouton pour l’effacer.</p>`;
+  }
+  const attCount = att => { const p = att.filter(x => x.present).length, n = att.length - p, tot = activeMembers().length; return `<span class="pill p-ok">${p} présent${p > 1 ? 's' : ''}</span><span class="pill p-late">${n} absent${n > 1 ? 's' : ''}</span><span class="pill p-blue">${Math.max(0, tot - att.length)} non noté${tot - att.length > 1 ? 's' : ''}</span>`; };
+
+  function minutesForm(m) {
+    if (!can('meetings')) return `${subHead('Compte rendu', B() + '/r/' + m.id)}<p class="note">Réservé au président, au vice-président et au secrétaire général.</p>`;
+    return `${subHead('Compte rendu', B() + '/r/' + m.id)}
+      <p class="muted" style="margin:0">${esc(m.title)} · ${esc(dLong(m.starts_at))}</p>
+      <form class="stack" data-form="minutes" data-id="${m.id}" novalidate>
+        <div class="field"><label for="cr-b">Ce qui a été dit et décidé</label><textarea id="cr-b" name="minutes" rows="12" maxlength="20000" placeholder="Décisions prises, montants votés, qui fait quoi et pour quand">${esc(m.minutes)}</textarea></div>
+        ${m.status === 'Prévue' ? '<div class="field"><label class="check"><input type="checkbox" name="held" checked> Marquer la réunion comme tenue</label></div>' : ''}
+        <p class="err" hidden></p><button class="btn primary block" type="submit">Publier le compte rendu</button>
+        <p class="help">Tous les membres pourront le lire dans l’application.</p></form>`;
+  }
+
+  /* Votes ------------------------------------------------------------ */
+  const pollOpen = p => p.status === 'Ouvert' && (!p.closes_at || new Date(p.closes_at).getTime() > Date.now());
+  const pollItem = p => `<a class="card meet-row" href="${B()}/vote/${p.id}"><span class="ico-box">${I.vote}</span><span class="body"><b>${esc(p.question)}</b><span class="muted">${pollOpen(p) ? (p.closes_at ? 'Jusqu’au ' + esc(dLong(p.closes_at)) : 'Ouvert') : 'Clos le ' + esc(dFR(p.closed_at || p.closes_at))}${p.anonymous ? ' · secret' : ''}</span></span><span class="pill ${pollOpen(p) ? 'p-ok' : 'p-blue'}">${pollOpen(p) ? 'Ouvert' : 'Clos'}</span></a>`;
+
+  V.votes = async (sub) => {
+    if (sub[1] === 'nouveau') return pollForm();
+    const res = await sb.from('polls').select('*').eq('association_id', S.ctx.assoc.id).order('created_at', { ascending: false }).limit(100);
+    if (res.error) return `${subHead('Votes', B() + '/vie')}<p class="note">Les votes ne sont pas encore installés sur la base.</p>`;
+    const open = res.data.filter(pollOpen), closed = res.data.filter(p => !pollOpen(p));
+    return `<div class="subhead between" style="margin-left:-8px"><span class="row" style="gap:6px"><a class="iconbtn" href="${B()}/vie" aria-label="Retour">${I.back}</a><h1>Votes</h1></span>${can('polls') ? `<a class="btn primary sm" href="${B()}/votes/nouveau">+ Nouveau vote</a>` : ''}</div>
+      <section class="stack"><h2>En cours</h2>${open.map(pollItem).join('') || `<div class="empty">Aucun vote en cours.${can('polls') ? ' Lancez-en un avec « + Nouveau vote ».' : ''}</div>`}</section>
+      ${closed.length ? `<section class="stack"><h2>Terminés</h2>${closed.map(pollItem).join('')}</section>` : ''}`;
+  };
+
+  function pollForm() {
+    if (!can('polls')) return `${subHead('Nouveau vote', B() + '/votes')}<p class="note">Réservé au président, au vice-président et au secrétaire général.</p>`;
+    return `${subHead('Nouveau vote', B() + '/votes')}
+      <form class="stack" data-form="poll" novalidate>
+        <div class="field"><label for="pl-q">Question</label><input id="pl-q" name="question" maxlength="300" placeholder="Ex. Augmenter la cotisation à 2 000 FCFA ?" required></div>
+        <div class="field"><label for="pl-o">Choix possibles (un par ligne)</label><textarea id="pl-o" name="options" rows="4">Oui
+Non
+Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
+        <div class="field"><label for="pl-d">Explication (facultatif)</label><textarea id="pl-d" name="description" rows="3" maxlength="2000" placeholder="Ce qu’il faut savoir avant de voter"></textarea></div>
+        <div class="row2"><div class="field"><label for="pl-cd">Fin du vote (facultatif)</label><input id="pl-cd" name="close_date" type="date"></div><div class="field"><label for="pl-ch">Heure</label><input id="pl-ch" name="close_time" type="time" value="20:00"></div></div>
+        <div class="field"><label class="check"><input type="checkbox" name="anonymous" checked> Vote secret</label><p class="help">Secret : personne ne voit qui a voté quoi, seulement le total. Sinon, chaque membre voit les noms par choix.</p></div>
+        <p class="err" hidden></p><button class="btn primary block" type="submit">Lancer le vote</button></form>`;
+  }
+
+  V.vote = async (sub) => {
+    const a = S.ctx.assoc;
+    const p = must(await sb.from('polls').select('*').eq('association_id', a.id).eq('id', sub[1]).maybeSingle());
+    if (!p) return `${subHead('Vote introuvable', B() + '/votes')}`;
+    const [opts, res, ballots] = await Promise.all([
+      sb.from('poll_options').select('*').eq('poll_id', p.id).order('position').then(must),
+      sb.rpc('poll_results', { p_poll: p.id }).then(must),
+      sb.from('poll_votes').select('*').eq('poll_id', p.id).then(must)
+    ]);
+    const count = new Map(res.map(r => [r.option_id, Number(r.votes)])), total = res.reduce((x, r) => x + Number(r.votes), 0);
+    const mine = ballots.find(v => v.member_id === S.ctx.me.id), open = pollOpen(p);
+    const voters = activeMembers().filter(m => m.user_id).length;
+    const showRes = !!mine || !open || can('polls');
+    const best = Math.max(0, ...res.map(r => Number(r.votes)));
+    const canVote = open && S.ctx.me.user_id && S.ctx.me.active && !S.ctx.me.pending;
+    const link = appLink('/a/' + a.id + '/vote/' + p.id);
+    const share = open ? `VOTE · ${a.name}\n\n${p.question}\nChoix : ${opts.map(o => o.label).join(' / ')}${p.closes_at ? '\nJusqu’au ' + dLong(p.closes_at) : ''}\n\nVotez dans l’application :\n${link}`
+      : `RÉSULTAT DU VOTE · ${a.name}\n\n${p.question}\n${opts.map(o => `${o.label} : ${count.get(o.id) || 0}`).join('\n')}\n\n${total} votant${total > 1 ? 's' : ''}`;
+    return `${subHead('Vote', B() + '/votes')}
+      <section class="card stack"><div class="between"><span class="pill ${open ? 'p-ok' : 'p-blue'}">${open ? 'Ouvert' : 'Clos'}</span><span class="muted" style="font-size:13px">${p.anonymous ? 'Vote secret' : 'Vote à main levée'}</span></div>
+        <h2 style="font-size:21px">${esc(p.question)}</h2>${p.description ? `<p style="margin:0;white-space:pre-line" class="muted">${esc(p.description)}</p>` : ''}
+        <span class="muted" style="font-size:13px">Lancé par ${esc(String(p.created_label || '').replace(/\s*\(.*\)$/, '') || '—')} · ${open ? (p.closes_at ? 'jusqu’au ' + esc(dLong(p.closes_at)) : 'sans date de fin') : 'clos le ' + esc(dFR(p.closed_at || p.closes_at))}</span></section>
+      ${canVote ? `<section class="stack"><h2>${mine ? 'Votre vote (vous pouvez changer)' : 'Votre vote'}</h2><div class="stack" style="gap:8px">${opts.map(o => `<button class="btn ghost block vote-opt" data-act="vote" data-poll="${p.id}" data-opt="${o.id}" aria-pressed="${mine && mine.option_id === o.id}">${esc(o.label)}</button>`).join('')}</div></section>` : ''}
+      ${!canVote && open && !S.ctx.me.user_id ? '<p class="note">Il faut un compte sur l’application pour voter.</p>' : ''}
+      <section class="card stack"><div class="between"><h2>Résultats</h2><span class="muted num" style="font-size:13px">${total} votant${total > 1 ? 's' : ''} sur ${voters}</span></div>
+        ${showRes ? opts.map(o => { const n = count.get(o.id) || 0, pc = pct(n, total); const names = !p.anonymous ? ballots.filter(v => v.option_id === o.id).map(v => memberName(v.member_id)) : [];
+          return `<div class="stack" style="gap:4px"><div class="between"><b>${esc(o.label)}${!open && n === best && n > 0 ? ' ✓' : ''}</b><span class="num">${n} · ${pc}${NB}%</span></div><div class="bar"><i style="width:${pc}%"></i></div>${names.length ? `<span class="muted" style="font-size:12.5px">${names.map(esc).join(', ')}</span>` : ''}</div>`; }).join('')
+          : '<span class="muted">Votez pour voir les résultats.</span>'}</section>
+      <div class="row" style="flex-wrap:wrap"><a class="btn wa sm" target="_blank" rel="noopener" href="${waShare(share)}">${I.wa} ${open ? 'Partager le vote' : 'Partager le résultat'}</a>
+        ${open && can('polls') ? `<button class="btn danger sm" data-act="closepoll" data-id="${p.id}">Clore le vote</button>` : ''}</div>`;
+  };
+
+  /* Documents -------------------------------------------------------- */
+  const DOC_CATS = ['Statuts', 'Règlement intérieur', 'Procès-verbal', 'Rapport', 'Reçu', 'Autre'];
+  const DOC_ACCEPT = '.pdf,.jpg,.jpeg,.png,.webp,.heic,.doc,.docx,.xls,.xlsx';
+  const fileSize = n => n >= 1048576 ? (n / 1048576).toFixed(1).replace('.', ',') + NB + 'Mo' : Math.max(1, Math.round(n / 1024)) + NB + 'Ko';
+  const docKind = (mime, name) => /pdf/.test(mime) || /\.pdf$/i.test(name) ? 'PDF' : /^image\//.test(mime) ? 'Photo' : /word|\.docx?$/i.test(mime + name) ? 'Word' : /sheet|excel|\.xlsx?$/i.test(mime + name) ? 'Excel' : 'Fichier';
+
+  V.documents = async (sub, q) => {
+    const a = S.ctx.assoc;
+    const f = DOC_CATS.includes(q.get('f')) ? q.get('f') : '';
+    let qy = sb.from('documents').select('*').eq('association_id', a.id);
+    if (f) qy = qy.eq('category', f);
+    const res = await qy.order('created_at', { ascending: false }).limit(200);
+    if (res.error) return `${subHead('Documents', B() + '/vie')}<p class="note">Les documents ne sont pas encore installés sur la base.</p>`;
+    const mg = can('docs');
+    return `${subHead('Documents', B() + '/vie')}
+      <div class="chips" role="group" aria-label="Filtrer">${[['', 'Tous'], ...DOC_CATS.map(c => [c, c])].map(([k, l]) => `<a class="chip" style="text-decoration:none" href="${B()}/documents${k ? '?f=' + encodeURIComponent(k) : ''}" aria-pressed="${f === k}">${esc(l)}</a>`).join('')}</div>
+      <div class="list">${res.data.map(d => `<div class="item"><span class="doc-ico" aria-hidden="true">${esc(docKind(d.mime, d.file_name))}</span><div class="body"><button class="t link-plain" data-act="opendoc" data-path="${esc(d.file_path)}">${esc(d.title)}</button><div class="s">${esc(d.category)} · ${dFR(d.created_at)} · ${fileSize(d.size)}</div></div>${mg ? `<button class="iconbtn sm-del" data-act="deldoc" data-id="${d.id}" data-path="${esc(d.file_path)}" aria-label="Retirer le document ${esc(d.title)}">✕</button>` : ''}</div>`).join('') || `<div class="empty">Aucun document${f ? ' dans cette catégorie' : ''}.${mg ? ' Ajoutez les statuts de l’association avec le formulaire ci-dessous.' : ''}</div>`}</div>
+      <div id="doc-open"></div>
+      ${mg ? `<form class="card stack" data-form="doc" novalidate><h2>Ajouter un document</h2>
+        <div class="field"><label for="dc-t">Titre</label><input id="dc-t" name="title" maxlength="160" placeholder="Ex. PV de l’AG du 18 octobre"></div>
+        <div class="field"><label for="dc-c">Catégorie</label><select id="dc-c" name="category">${DOC_CATS.map(c => opt(c, c, f || 'Procès-verbal')).join('')}</select></div>
+        <div class="field"><label for="dc-f">Fichier (PDF, photo, Word ou Excel, 10 Mo maximum)</label><input id="dc-f" name="file" type="file" accept="${DOC_ACCEPT}"></div>
+        <p class="err" hidden></p><button class="btn primary block" type="submit">Ajouter</button>
+        <p class="help">Tous les membres validés pourront le lire. Une photo prise avec le téléphone convient très bien.</p></form>` : ''}`;
+  };
+
+  /* Rapport mensuel -------------------------------------------------- */
+  const addMonthYM = (p, k) => { const [y, m] = p.split('-').map(Number); const d = new Date(y, m - 1 + k, 1); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; };
+  V.rapport = async (sub, q) => {
+    const a = S.ctx.assoc, cur = curYM();
+    const M = /^\d{4}-\d{2}$/.test(q.get('m') || '') && q.get('m') <= cur ? q.get('m') : cur;
+    const start = M + '-01', next = addMonthYM(M, 1) + '-01';
+    const txs = await fetchAll(() => sb.from('transactions').select('id,kind,amount,category,occurred_on,member_id,period,description,project_id,reversal_of').eq('association_id', a.id).lt('occurred_on', next).order('id'));
+    const fx = t => (t.kind === 'in' ? 1 : -1) * Number(t.amount);
+    const before = txs.filter(t => t.occurred_on < start), during = txs.filter(t => t.occurred_on >= start);
+    const open = before.reduce((x, t) => x + fx(t), 0);
+    const inM = during.filter(t => t.kind === 'in').reduce((x, t) => x + Number(t.amount), 0), outM = during.filter(t => t.kind === 'out').reduce((x, t) => x + Number(t.amount), 0);
+    const close = open + inM - outM;
+    const byCat = kind => { const m = new Map(); during.filter(t => t.kind === kind).forEach(t => m.set(t.category, (m.get(t.category) || 0) + Number(t.amount))); return [...m.entries()].filter(e => e[1] !== 0).sort((x, y) => y[1] - x[1]); };
+    const deM = x => { const l = pFR(x); return /^[aeiouâéèh]/i.test(l) ? 'd’' + l : 'de ' + l; };
+    const fee = hasFees() ? 1 : 0;
+    const dueNow = activeMembers().filter(m => dueIn(m, M));
+    const paidN = dueNow.filter(m => paidFor(m.id, M) >= feeOf(m)).length;
+    const collected = dueNow.reduce((x, m) => x + Math.min(paidFor(m.id, M), feeOf(m)), 0), expected = dueNow.reduce((x, m) => x + feeOf(m), 0);
+    const unpaid = fee ? dueNow.filter(m => paidFor(m.id, M) < feeOf(m)) : [];
+    const [meets, polls, projects, ptot] = await Promise.all([
+      sb.from('meetings').select('*').eq('association_id', a.id).gte('starts_at', new Date(start + 'T00:00:00').toISOString()).lt('starts_at', new Date(next + 'T00:00:00').toISOString()).order('starts_at').then(r => r.error ? [] : r.data, () => []),
+      sb.from('polls').select('*').eq('association_id', a.id).eq('status', 'Clos').gte('closed_at', new Date(start + 'T00:00:00').toISOString()).lt('closed_at', new Date(next + 'T00:00:00').toISOString()).then(r => r.error ? [] : r.data, () => []),
+      sb.from('projects').select('*').eq('association_id', a.id).eq('status', 'En cours').then(r => r.error ? [] : r.data, () => []),
+      sb.from('v_project_totals').select('*').then(r => r.error ? [] : r.data, () => [])
+    ]);
+    const pollRes = await Promise.all(polls.map(p => Promise.all([sb.from('poll_options').select('*').eq('poll_id', p.id).order('position').then(must), sb.rpc('poll_results', { p_poll: p.id }).then(must)])));
+    const tot = new Map(ptot.map(x => [x.project_id, x]));
+    const months = []; for (let k = 0; k < 12; k++) months.push(addMonthYM(cur, -k));
+    const title = `Rapport ${deM(M)}`;
+    const wa = `${title.toUpperCase()} · ${a.name}\n\nSolde au début du mois : ${money(open)}\nEntrées : +${money(inM)}\nSorties : −${money(outM)}\nSolde à la fin du mois : ${money(close)}${fee ? `\n\nCotisations : ${paidN} membre${paidN > 1 ? 's' : ''} sur ${dueNow.length} à jour (${money(collected)} sur ${money(expected)})` : ''}${meets.length ? `\nRéunions : ${meets.length}` : ''}${polls.length ? `\nVotes clos : ${polls.length}` : ''}\n\nDétails dans l’application :\n${appLink('/a/' + a.id + '/rapport?m=' + M)}`;
+    const catList = rows => rows.length ? `<dl class="kv num" style="margin:0">${rows.map(([c, v]) => `<dt>${esc(c)}</dt><dd>${money(v)}</dd>`).join('')}</dl>` : '<span class="muted">Aucune.</span>';
+    return `<div class="no-print">${subHead('Rapport mensuel', B() + '/transparence')}</div>
+      <div class="field no-print"><label for="rp-m">Mois</label><select id="rp-m" data-nav="rapport">${months.map(x => opt(x, pFR(x).replace(/^./, c => c.toUpperCase()), M)).join('')}</select></div>
+      <div class="row no-print" style="flex-wrap:wrap"><button class="btn primary sm" data-act="print">Télécharger en PDF</button><a class="btn wa sm" target="_blank" rel="noopener" href="${waShare(wa)}">${I.wa} Partager le résumé</a></div>
+      <article class="report stack">
+        <header class="report-head"><span class="eyebrow">${esc(a.name)}</span><h1>${esc(title)}</h1><span class="muted" style="font-size:13px">Établi le ${dFR(todayISO())} avec VillageLink</span></header>
+        <section class="card stack"><h2>Caisse</h2><dl class="kv num" style="margin:0"><dt>Solde au début du mois</dt><dd>${money(open)}</dd><dt>Entrées du mois</dt><dd style="color:var(--green)">${inM ? '+' : ''}${money(inM)}</dd><dt>Sorties du mois</dt><dd style="color:var(--danger)">${outM ? '−' : ''}${money(outM)}</dd><dt><b>Solde à la fin du mois</b></dt><dd><b>${money(close)}</b></dd></dl></section>
+        ${fee ? `<section class="card stack"><div class="between"><h2>Cotisations ${esc(deM(M))}</h2><span class="pill p-blue num">${paidN}/${dueNow.length} à jour</span></div>
+          <div class="bar"><i style="width:${pct(collected, expected)}%"></i></div><span class="muted num">${money(collected)} encaissés sur ${money(expected)} attendus</span>
+          ${unpaid.length ? `<span class="eyebrow">Pas encore payé (${unpaid.length})</span><p style="margin:0">${unpaid.map(m => esc(m.full_name)).join(', ')}</p>` : '<span class="ok-msg">Tout le monde a payé ce mois-ci.</span>'}</section>` : ''}
+        <section class="card stack"><h2>Entrées par catégorie</h2>${catList(byCat('in'))}</section>
+        <section class="card stack"><h2>Dépenses par catégorie</h2>${catList(byCat('out'))}</section>
+        ${meets.length ? `<section class="card stack"><h2>Réunions</h2>${meets.map(m => `<div><b>${esc(m.title)}</b> · ${esc(dLong(m.starts_at))} · <span class="pill ${MEET_PILL[m.status]}">${esc(m.status)}</span>${m.minutes ? `<p class="muted" style="margin:4px 0 0;white-space:pre-line">${esc(m.minutes.slice(0, 600))}${m.minutes.length > 600 ? '…' : ''}</p>` : ''}</div>`).join('')}</section>` : ''}
+        ${polls.length ? `<section class="card stack"><h2>Décisions votées</h2>${polls.map((p, i) => { const [opts, res] = pollRes[i]; const c = new Map(res.map(r => [r.option_id, Number(r.votes)])); return `<div><b>${esc(p.question)}</b><p class="muted" style="margin:2px 0 0">${opts.map(o => `${esc(o.label)} : ${c.get(o.id) || 0}`).join(' · ')}</p></div>`; }).join('')}</section>` : ''}
+        ${projects.length ? `<section class="card stack"><h2>Projets en cours</h2>${projects.map(p => { const t = tot.get(p.id) || { collected: 0 }; const pc = pct(t.collected, p.goal); return `<div class="stack" style="gap:4px"><div class="between"><b>${esc(p.name)}</b><span class="num">${pc}${NB}%</span></div><div class="bar thin"><i style="width:${pc}%"></i></div><span class="muted num" style="font-size:13px">${money(t.collected)} sur ${money(p.goal)}</span></div>`; }).join('')}</section>` : ''}
+      </article>`;
+  };
+
+  /* Notifications ---------------------------------------------------- */
+  const NOTIF_LINKS = [[/abonnement/i, 'abonnement', I.wallet], [/dispens/i, 'membres', I.users], [/déclaré avoir payé|paiement déclaré|déclaration de paiement/i, 'cotisations?f=claims', I.wallet], [/numéros de paiement/i, 'parametres', I.gear], [/annonce/i, 'annonces', I.mega], [/réunion|compte rendu|convocation/i, 'reunions', I.cal], [/vote/i, 'votes', I.vote], [/document/i, 'documents', I.doc],
+    [/collecte/i, 'collectes', I.heart], [/section/i, 'sections', I.users], [/approbation|approuvé la dépense|refusé la dépense|demande de dépense|double validation/i, 'depenses', I.list], [/cotisation|recette|dépense|opération|contre-écriture/i, 'finances', I.list], [/projet|mise à jour/i, 'projets', I.drop], [/membre|adhésion|rôle|retiré|réintégré|bureau|rejoindre|demande de/i, 'membres', I.users], [/message|discussion/i, 'discussion', I.chat]];
+  V.notifications = async () => {
+    const a = S.ctx.assoc, seenKey = 'vl:notif:' + a.id, seen = Number(store.get(seenKey) || 0);
+    const rows = must(await sb.from('activity_log').select('*').eq('association_id', a.id).order('id', { ascending: false }).limit(40));
+    if (rows[0]) store.set(seenKey, String(Math.max(rows[0].id, seen)));
+    S.ctx.notif = 0;
+    try { if (navigator.clearAppBadge) navigator.clearAppBadge(); } catch (e) { /* non pris en charge */ }
+    const item = l => { const hit = NOTIF_LINKS.find(([re]) => re.test(l.message)) || [null, 'journal', I.clock]; const fresh = l.id > seen && l.actor_id !== S.user.id;
+      return `<a class="item notif ${fresh ? 'fresh' : ''}" href="${B()}/${hit[1]}"><span class="ico">${hit[2]}</span><div class="body"><div class="s wrap" style="color:var(--ink)"><b>${esc(String(l.actor_label || '').replace(/\s*\(.*\)$/, ''))}</b> ${esc(l.message)}</div><div class="s">${dFR(localDay(l.created_at))} à ${hm(l.created_at)}${fresh ? ' · <b class="new">Nouveau</b>' : ''}</div></div></a>`; };
+    return `${subHead('Notifications', B())}
+      <div class="row" style="flex-wrap:wrap"><a class="btn ghost sm" href="${B()}/annonces">${I.mega.replace('<svg ', '<svg width="18" height="18" ')} Annonces</a><a class="btn ghost sm" href="${B()}/journal">Tout le journal</a></div>
+      <div class="list menu">${rows.map(item).join('') || '<div class="empty">Rien de nouveau pour le moment.</div>'}</div>
+      <p class="help">Les nouveautés faites par les autres membres apparaissent ici : annonces, réunions, votes, documents, paiements et membres.</p>`;
+  };
+
+  const MSG_KINDS = ['Message', 'Idée', 'Réclamation'];
+  V.discussion = async (sub, q) => {
+    const a = S.ctx.assoc;
+    const f = MSG_KINDS.includes(q.get('f')) ? q.get('f') : '';
+    let qy = sb.from('messages').select('*').eq('association_id', a.id);
+    if (f) qy = qy.eq('kind', f);
+    const res = await qy.order('id', { ascending: false }).limit(100);
+    if (res.error) return `${subHead('Discussion', B() + '/vie')}<p class="note">La discussion n’est pas encore installée sur la base. Le président doit coller le script « migration 1.2 » dans Supabase.</p>`;
+    const rows = res.data.slice().reverse();
+    if (rows.length) store.set('vl:seen:' + a.id, String(Math.max(...rows.map(m => m.id), S.ctx.lastMsg || 0)));
+    const canHideAll = ['president', 'vice_president', 'secretaire'].includes(S.ctx.me.role);
+    const pill = { Idée: 'p-ok', Réclamation: 'p-late', Message: '' };
+    return `${subHead('Discussion', B() + '/vie')}
+      <div class="chips" role="group" aria-label="Filtrer">${[['', 'Tout'], ['Idée', 'Idées'], ['Réclamation', 'Réclamations']].map(([k, l]) => `<a class="chip" style="text-decoration:none" href="${B()}/discussion${k ? '?f=' + encodeURIComponent(k) : ''}" aria-pressed="${f === k}">${l}</a>`).join('')}</div>
+      <div class="chat" id="chat">${rows.map(m => { const mine = m.author_id === S.user.id; return `<div class="msg ${mine ? 'mine' : ''} ${m.hidden ? 'hidden-msg' : ''}">
+        <div class="msg-head"><b>${esc(mine ? 'Vous' : m.author_label)}</b>${m.kind !== 'Message' ? ` <span class="pill ${pill[m.kind]}">${esc(m.kind)}</span>` : ''}</div>
+        <div class="msg-body">${m.hidden ? 'Message masqué' + (m.hidden_by ? ' par ' + esc(m.hidden_by) : '') : (m.audio_path && m.body === 'Message vocal' ? '' : esc(m.body))}${m.hidden ? '' : voicePlay(m.audio_path, m.audio_seconds)}</div>
+        <div class="msg-foot"><span>${dFR(localDay(m.created_at))} à ${hm(m.created_at)}</span>${!m.hidden && (mine || canHideAll) ? `<button class="link" data-act="hidemsg" data-id="${m.id}">Masquer</button>` : ''}</div></div>`; }).join('') || `<div class="empty">Aucun message${f ? ' dans cette catégorie' : ''}. Écrivez le premier !</div>`}</div>
+      <form class="card stack" data-form="message" novalidate>
+        <div class="field"><label for="ms-k">Type</label><select id="ms-k" name="kind">${MSG_KINDS.map(k => opt(k, k, f || 'Message')).join('')}</select></div>
+        <div class="field"><label for="ms-b">Votre message</label><textarea id="ms-b" name="body" rows="3" maxlength="1000" placeholder="Écrivez, ou enregistrez un message vocal"></textarea></div>
+        ${voiceBox('msg')}
+        <p class="err" hidden></p><button class="btn primary block" type="submit">Envoyer</button>
+        <p class="help">Visible par tous les membres validés. Le président, le vice-président et le secrétaire peuvent masquer un message déplacé.</p></form>`;
+  };
+  AFTER.discussion = () => { const c = $('#chat'); if (c && c.lastElementChild) c.lastElementChild.scrollIntoView({ block: 'end' }); };
+
+  V.journal = async (sub, q) => {
+    const p = Math.max(0, Math.floor(Number(q.get('p'))) || 0), size = 50;
+    const rows = must(await sb.from('activity_log').select('*').eq('association_id', S.ctx.assoc.id).order('id', { ascending: false }).range(p * size, p * size + size));
+    const more = rows.length > size; if (more) rows.pop();
+    return `${subHead('Journal d’activité', B() + '/transparence')}<p class="note">Le journal est en lecture seule. Personne, pas même le président, ne peut effacer une ligne.</p>
+      <div class="list">${rows.map(logItem).join('') || '<div class="empty">Aucune activité.</div>'}</div>
+      ${p || more ? `<div class="pager">${p ? `<a class="btn ghost sm" href="${B()}/journal?p=${p - 1}">← Plus récent</a>` : '<span></span>'}${more ? `<a class="btn ghost sm" href="${B()}/journal?p=${p + 1}">Plus ancien →</a>` : ''}</div>` : ''}`;
+  };
+
+  V.plus = async () => {
+    const a = S.ctx.assoc, me = S.ctx.me, st = subStatus(a);
+    const items = [['parametres', 'Paramètres de l’association', 'Fiche, cotisation, numéros de paiement, code d’invitation', I.gear]];
+    if (canManageSub()) items.push(['abonnement', 'Abonnement', st === 'active' ? `Formule ${(PLANS[a.plan] || {}).label || ''} jusqu’au ${dFR(a.paid_until)}` : st === 'trial' ? (a.trial_ends ? `Essai gratuit jusqu’au ${dFR(a.trial_ends)}` : 'Essai gratuit') : 'Essai terminé : activer l’abonnement', I.wallet]);
+    items.push(['__assoc', 'Mes associations', 'Changer, rejoindre ou créer une association', I.swap]);
+    return `<h1>Mon profil</h1>
+      <div class="row"><span class="av lg" aria-hidden="true">${esc(initials(me.full_name))}</span><div style="min-width:0"><h2>${esc(me.full_name)}</h2><div class="muted" style="font-size:15px">${esc(ROLES[me.role])} · ${esc(S.user.email || '')}</div></div></div>
+      <div class="list menu">${items.map(([k, t, sx, ic]) => `<a class="item" href="${k === '__assoc' ? '#/bienvenue' : B() + '/' + k}"><span class="ico">${ic}</span><div class="body"><div class="t">${t}</div><div class="s">${sx}</div></div><span class="chev">${I.chev}</span></a>`).join('')}</div>
+      <section class="card stack" id="push-card"><h2>Rappels sur ce téléphone</h2><p class="muted" style="margin:0;font-size:15px">Recevez une notification 3 jours avant l’échéance de votre cotisation, le jour même, et en cas de retard.</p><div id="push-state" class="stack"><span class="muted">Vérification…</span></div></section>
+      <section class="card stack"><h2>Langue</h2><div class="seg" role="group" aria-label="Langue">${LANGS.map(([k, l]) => `<button data-act="lang" data-lang="${k}" aria-pressed="${langNow() === k}">${l}</button>`).join('')}</div>
+        <p class="help">Le pular est en essai : certains textes restent en français.</p></section>
+      <section class="card stack"><h2>Apparence</h2><div class="seg seg3" role="group" aria-label="Apparence">${THEMES.map(([k, l]) => `<button data-act="theme" data-theme="${k}" aria-pressed="${themeNow() === k}">${l}</button>`).join('')}</div>
+        <p class="help">Le mode clair se lit mieux en plein soleil.</p></section>
+      <button class="btn danger block" data-act="signout">${I.out} Se déconnecter</button>
+      ${delAcctBox()}
+      <p class="muted" style="font-size:13px;text-align:center">VillageLink · version 2.0 · <a class="link" href="confidentialite.html">Confidentialité</a> · <a class="link" href="conditions.html">Conditions</a></p>`;
+  };
+
+  /* Notifications sur le téléphone ----------------------------------- */
+  const VAPID_PUBLIC = 'BHdpu4C4Fk4SvXgfSIzwgUIdpNPU4jLnPYFVuDVegMGDbiXhQuA5UqO5rDp3jQrCY0RFzYq2AFihYshAxKF_zY0';
+  const b64u = s => { const p = '='.repeat((4 - s.length % 4) % 4), b = atob((s + p).replace(/-/g, '+').replace(/_/g, '/')); return Uint8Array.from(b, c => c.charCodeAt(0)); };
+  const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && (location.protocol === 'https:' || location.hostname === '127.0.0.1');
+  async function pushSub() { if (!pushSupported()) return null; const reg = await navigator.serviceWorker.getRegistration(); return reg ? reg.pushManager.getSubscription() : null; }
+  async function drawPush() {
+    const box = $('#push-state'); if (!box) return;
+    if (!pushSupported()) { box.innerHTML = '<p class="note" style="margin:0">Ce navigateur ne reçoit pas les notifications. Sur Android, ouvrez VillageLink dans Chrome et installez l’application. Sur iPhone, ajoutez-la d’abord à l’écran d’accueil.</p>'; return; }
+    if (Notification.permission === 'denied') { box.innerHTML = '<p class="note" style="margin:0">Les notifications sont bloquées pour VillageLink. Autorisez-les dans les réglages du navigateur (cadenas à côté de l’adresse → Notifications), puis revenez ici.</p>'; return; }
+    let sub = null; try { sub = await pushSub(); } catch (e) { /* rien */ }
+    box.innerHTML = sub
+      ? '<span class="pill p-ok" style="width:max-content">Activés sur ce téléphone</span><div class="row" style="flex-wrap:wrap"><button class="btn ghost sm" data-act="pushtest">Envoyer une notification de test</button><button class="btn ghost sm" data-act="pushoff">Désactiver</button></div>'
+      : '<button class="btn primary block" data-act="pushon">Activer les rappels</button>';
+  }
+  async function pushOn() {
+    if (!pushSupported()) fail('Ce navigateur ne reçoit pas les notifications.');
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') fail('Autorisez les notifications pour recevoir les rappels.');
+    const reg = await navigator.serviceWorker.register('sw.js'); await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(VAPID_PUBLIC) });
+    const j = sub.toJSON();
+    must(await sb.rpc('save_push_subscription', { p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth, p_ua: navigator.userAgent.slice(0, 300) }));
+  }
+  async function pushOff(silent) {
+    const sub = await pushSub().catch(() => null); if (!sub) return;
+    try { await sb.rpc('remove_push_subscription', { p_endpoint: sub.endpoint }); } catch (e) { if (!silent) throw e; }
+    await sub.unsubscribe().catch(() => {});
+  }
+  async function pushTest() {
+    const { data } = await sb.auth.getSession(), tok = data && data.session && data.session.access_token;
+    const r = await fetch(CFG.supabaseUrl + '/functions/v1/send-reminders', { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: CFG.supabaseAnonKey, Authorization: 'Bearer ' + tok }, body: '{}' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) fail(j.error || 'Envoi impossible pour le moment.');
+    if (!j.sent) fail('Ce téléphone n’est plus inscrit. Désactivez puis réactivez les rappels.');
+  }
+  AFTER.plus = () => { drawPush(); };
+
+  /* Langue : français ou pular (traduction des textes affichés) -------- */
+  const LANGS = [['fr', 'Français'], ['ff', 'Pular (essai)']];
+  const langNow = () => (store.get('vl:lang') === 'ff' && window.VL_FF ? 'ff' : 'fr');
+  const FF_ATTRS = ['placeholder', 'aria-label', 'title'];
+  function translateTree(node) {
+    if (langNow() !== 'ff' || !node) return;
+    const D = window.VL_FF;
+    const tr = txt => { const k = txt.trim(); return k && Object.prototype.hasOwnProperty.call(D, k) ? txt.replace(k, D[k]) : null; };
+    if (node.nodeType === 3) { const v = tr(node.nodeValue); if (v != null) node.nodeValue = v; return; }
+    if (node.nodeType !== 1) return;
+    const w = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, { acceptNode: n => (n.parentNode && /^(SCRIPT|STYLE|TEXTAREA)$/.test(n.parentNode.nodeName) ? 2 : 1) });
+    const list = []; while (w.nextNode()) list.push(w.currentNode);
+    list.forEach(n => { const v = tr(n.nodeValue); if (v != null) n.nodeValue = v; });
+    [node, ...node.querySelectorAll('[placeholder],[aria-label],[title]')].forEach(el => FF_ATTRS.forEach(a => { if (el.hasAttribute && el.hasAttribute(a)) { const v = tr(el.getAttribute(a)); if (v != null) el.setAttribute(a, v); } }));
+  }
+  function applyLang() {
+    document.documentElement.lang = langNow() === 'ff' ? 'ff' : 'fr';
+    if (applyLang.obs) { applyLang.obs.disconnect(); applyLang.obs = null; }
+    if (langNow() !== 'ff') return;
+    translateTree(document.body);
+    applyLang.obs = new MutationObserver(ms => ms.forEach(m => { if (m.type === 'characterData') translateTree(m.target); else m.addedNodes.forEach(translateTree); }));
+    applyLang.obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+  }
+  applyLang();
+
+  function catsCard() {
+    const cats = S.ctx.cats || [], mg = can('categories'), cur = esc(CUR_LABEL[S.ctx.assoc.currency] || S.ctx.assoc.currency);
+    const count = id => activeMembers().filter(m => m.category_id === id).length;
+    return `<section class="card stack" id="categories"><h2>Catégories de membres</h2>
+      <p class="muted" style="margin:0;font-size:13.5px">Quand tous ne paient pas la même cotisation : par exemple « Gérant / propriétaire » et « Apprenti ». Un membre sans catégorie paie la cotisation générale ci-dessous. Mettez 0 pour une catégorie dispensée.</p>
+      ${cats.map(c => mg ? `<form class="cat-row" data-form="category" data-id="${c.id}" novalidate><input name="name" value="${esc(c.name)}" maxlength="60" aria-label="Nom de la catégorie"><input name="fee_amount" type="number" inputmode="numeric" min="0" step="1" value="${esc(c.fee_amount)}" aria-label="Cotisation par mois (${cur})"><button class="btn ghost sm" type="submit">OK</button><button class="iconbtn sm-del" type="button" data-act="delcat" data-id="${c.id}" aria-label="Supprimer la catégorie ${esc(c.name)}">✕</button><span class="muted cat-n">${count(c.id)} membre${count(c.id) > 1 ? 's' : ''} · ${Number(c.fee_amount) ? money(c.fee_amount) + ' par mois' : 'dispensés'}</span><p class="err" hidden></p></form>`
+        : `<div class="between num"><span>${esc(c.name)} <span class="muted">(${count(c.id)})</span></span><b>${Number(c.fee_amount) ? money(c.fee_amount) : 'Dispensé'}</b></div>`).join('') || '<span class="muted">Aucune catégorie : tout le monde paie la même cotisation.</span>'}
+      ${mg && !fullPlan() ? upsell('Les catégories de cotisation : gérant, apprenti…') : ''}${mg && fullPlan() ? `<form class="stack" data-form="category" novalidate><div class="row2"><div class="field"><label for="ct-n">Nouvelle catégorie</label><input id="ct-n" name="name" maxlength="60" placeholder="Ex. Apprenti"></div><div class="field"><label for="ct-f">Cotisation par mois (${cur})</label><input id="ct-f" name="fee_amount" type="number" inputmode="numeric" min="0" step="1" placeholder="Ex. 1000"></div></div><p class="err" hidden></p><button class="btn ghost block" type="submit">Ajouter la catégorie</button></form>
+        ${cats.length ? '<p class="help">Rangez ensuite chaque membre dans sa catégorie depuis sa fiche (Modifier la fiche).</p>' : ''}` : ''}</section>`;
+  }
+
+  const mmCard = () => {
+    const p = S.ctx.payNums || {}, ed = canSetPayNums(), ro = ed ? '' : 'disabled';
+    return `<form class="card stack" id="mm" data-form="paynums" novalidate><h2>Recevoir les cotisations par mobile money</h2>
+      <p class="muted" style="margin:0;font-size:13.5px">Les membres envoient l’argent à ces numéros avec leur propre application, puis touchent « J’ai payé ». La cotisation compte quand le trésorier confirme l’avoir reçue. VillageLink ne touche jamais à l’argent.</p>
+      ${ed ? '' : '<p class="help">Seuls le président et le trésorier changent ces numéros. Chaque changement est visible dans le journal.</p>'}
+      <div class="field"><label for="mm-h">Nom affiché chez Wave / Orange Money</label><input id="mm-h" name="holder" value="${esc(p.holder || '')}" placeholder="Ex. Boubacar Baldé" ${ro}></div>
+      <div class="field"><label for="mm-w">Numéro Wave</label><input id="mm-w" name="wave" type="tel" inputmode="tel" value="${esc(p.wave || '')}" placeholder="+221 77 000 00 00" ${ro}></div>
+      <div class="field"><label for="mm-l">Lien de paiement Wave (conseillé)</label><input id="mm-l" name="wave_link" type="url" inputmode="url" value="${esc(p.wave_link || '')}" placeholder="https://pay.wave.com/m/…" ${ro}><p class="help">Dans Wave : <b>Envoi de lien</b>, puis copiez le lien. Les membres auront un bouton qui ouvre Wave avec le bon montant déjà rempli.</p></div>
+      <div class="field"><label for="mm-o">Numéro Orange Money</label><input id="mm-o" name="orange" type="tel" inputmode="tel" value="${esc(p.orange || '')}" ${ro}></div>
+      <div class="field"><label for="mm-f">Numéro Free Money</label><input id="mm-f" name="free" type="tel" inputmode="tel" value="${esc(p.free || '')}" ${ro}></div>
+      ${ed ? '<p class="err" hidden></p><button class="btn primary block" type="submit">Enregistrer les numéros</button><p class="help">Laissez vide un service que vous n’utilisez pas. Tous les membres seront prévenus du changement.</p>' : ''}</form>`;
+  };
+
+  V.parametres = async () => {
+    const a = S.ctx.assoc, pres = can('settings');
+    const invite = `Rejoignez « ${a.name} » sur VillageLink pour suivre les cotisations et les projets du village.\n\n1. Ouvrez ${location.origin + location.pathname}\n2. Créez votre compte\n3. Entrez le code : ${a.invite_code}`;
+    const ro = pres ? '' : 'disabled';
+    return `${subHead('Association', B() + '/plus')}
+      <section class="card stack"><h2>Code d’invitation</h2><p class="muted" style="margin:0;font-size:13.5px">Les membres créent leur compte puis entrent ce code. Ceux que le trésorier a déjà inscrits retrouvent leur historique grâce à leur numéro de téléphone.</p>
+        <div class="code">${esc(a.invite_code)}</div>
+        <a class="btn wa block" target="_blank" rel="noopener" href="${waShare(invite)}">${I.wa} Envoyer l’invitation sur WhatsApp</a>
+        ${pres ? '<button class="btn ghost sm" data-act="newcode">Changer le code</button>' : ''}</section>
+      ${catsCard()}
+      ${mmCard()}
+      <form class="stack" data-form="assoc" novalidate>
+        ${pres ? '' : '<p class="note">Seul le président peut modifier ces informations.</p>'}
+        <span class="eyebrow">Cotisation</span>
+        <div class="row2"><div class="field"><label for="as-fee">${(S.ctx.cats || []).length ? 'Cotisation générale par mois' : 'Montant par mois'}</label><input id="as-fee" name="fee_amount" type="number" inputmode="numeric" min="0" step="1" value="${esc(a.fee_amount)}" ${ro}></div><div class="field"><label for="as-due">Jour d’échéance</label><input id="as-due" name="fee_due_day" type="number" inputmode="numeric" min="1" max="28" value="${esc(a.fee_due_day)}" ${ro}></div></div>
+        <div class="field"><label for="as-start">Suivre les cotisations à partir de</label><input id="as-start" name="dues_start" type="month" value="${esc(ym(a.dues_start))}" ${ro}><p class="help">Les mois précédents ne comptent pas comme des retards.</p></div>
+        <div class="field"><label for="as-cur">Monnaie</label><select id="as-cur" name="currency" ${ro}>${CURRENCIES.map(([k, l]) => opt(k, l, a.currency)).join('')}</select></div>
+        <span class="eyebrow">Dépenses</span>
+        <div class="field"><label class="check" style="align-items:flex-start"><input type="checkbox" name="expense_approval" ${a.expense_approval ? 'checked' : ''} ${ro} style="margin-top:2px"> <span><b>Double validation des dépenses</b><br><span class="muted" style="font-size:13px;font-weight:400">Le trésorier propose, le président ou le vice-président approuve. Aucune sortie d’argent sans deux personnes.</span></span></label></div>
+        <span class="eyebrow">Fiche de l’association</span>
+        <div class="field"><label for="as-name">Nom</label><input id="as-name" name="name" value="${esc(a.name)}" ${ro}></div>
+        <div class="row2"><div class="field"><label for="as-vil">Village d’origine</label><input id="as-vil" name="village" value="${esc(a.village)}" ${ro}></div><div class="field"><label for="as-oc">Pays d’origine</label><input id="as-oc" name="origin_country" value="${esc(a.origin_country)}" ${ro}></div></div>
+        <div class="row2"><div class="field"><label for="as-reg">Région</label><input id="as-reg" name="region" value="${esc(a.region)}" ${ro}></div><div class="field"><label for="as-pre">Préfecture</label><input id="as-pre" name="prefecture" value="${esc(a.prefecture)}" ${ro}></div></div>
+        <div class="row2"><div class="field"><label for="as-rc">Ville de résidence</label><input id="as-rc" name="residence_city" value="${esc(a.residence_city)}" ${ro}></div><div class="field"><label for="as-rco">Pays de résidence</label><input id="as-rco" name="residence_country" value="${esc(a.residence_country)}" ${ro}></div></div>
+        <div class="field"><label for="as-fd">Date de création</label><input id="as-fd" name="founded_on" type="date" value="${esc(a.founded_on)}" ${ro}></div>
+        <div class="field"><label for="as-desc">Description</label><textarea id="as-desc" name="description" rows="3" ${ro}>${esc(a.description)}</textarea></div>
+        ${pres ? '<p class="err" hidden></p><button class="btn primary block" type="submit">Enregistrer</button>' : ''}
+      </form>`;
+  };
+
+  /* ------------------------------------------------------------------
+     Formulaires
+  ------------------------------------------------------------------ */
+  const val = (fd, k) => String(fd.get(k) ?? '').trim();
+  const intVal = (fd, k) => { const v = val(fd, k); return v === '' ? NaN : Math.round(Number(v)); };
+  const fail = m => { const e = new Error(m); e.user = true; throw e; };
+
+  async function compress(file) {
+    if (!file || !file.size) return null;
+    if (file.type.startsWith('image/') && !/heic|heif/i.test(file.type) && window.createImageBitmap) {
+      try {
+        const bmp = await createImageBitmap(file);
+        const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+        const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+        c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+        const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.8));
+        if (blob) return new File([blob], 'justificatif.jpg', { type: 'image/jpeg' });
+      } catch (e) { /* on envoie l'original */ }
+    }
+    return file;
+  }
+
+  const FORMS = {
+    async auth(fd) {
+      const email = val(fd, 'email'), pw = String(fd.get('password') || '');
+      if (!/^\S+@\S+\.\S+$/.test(email)) fail('Saisissez une adresse email valide.');
+      if (S.authMode === 'reset') {
+        must(await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname }));
+        S.authMsg = 'Si un compte existe pour cette adresse, un lien pour choisir un nouveau mot de passe vient d’être envoyé.';
+        S.authMode = 'login'; return renderAuth();
+      }
+      if (pw.length < 8) fail('Le mot de passe doit faire au moins 8 caractères.');
+      if (S.authMode === 'signup') {
+        const r = must(await sb.auth.signUp({ email, password: pw, options: { emailRedirectTo: location.origin + location.pathname } }));
+        if (!r.session) { S.authMsg = 'Compte créé. Ouvrez le lien reçu par email pour l’activer, puis connectez-vous.'; S.authMode = 'login'; return renderAuth(); }
+      } else {
+        must(await sb.auth.signInWithPassword({ email, password: pw }));
+      }
+      S.authMsg = '';
+    },
+    async newpw(fd) {
+      const pw = String(fd.get('password') || '');
+      if (pw.length < 8) fail('Le mot de passe doit faire au moins 8 caractères.');
+      must(await sb.auth.updateUser({ password: pw }));
+      toast('Mot de passe modifié'); go('#/');
+    },
+    async join(fd) {
+      const code = val(fd, 'code'), name = val(fd, 'full_name');
+      if (code.length < 4) fail('Saisissez le code d’invitation.');
+      if (name.length < 2) fail('Saisissez votre nom complet.');
+      const id = must(await sb.rpc('join_association', { p_code: code, p_full_name: name, p_phone: val(fd, 'phone') }));
+      S.ctx = null;
+      const mine = must(await sb.rpc('my_memberships')).find(a => a.association_id === id);
+      if (mine && mine.pending) { toast('Demande envoyée au bureau'); return renderWelcome(); }
+      toast('Bienvenue dans l’association'); go('#/a/' + id);
+    },
+    async create(fd) {
+      const name = val(fd, 'name'), you = val(fd, 'full_name'), fee = intVal(fd, 'fee'), due = intVal(fd, 'due_day');
+      if (name.length < 3) fail('Donnez un nom à l’association.');
+      if (you.length < 2) fail('Saisissez votre nom complet.');
+      if (!val(fd, 'village')) fail('Indiquez le village ou la ville d’origine.');
+      if (!isNaN(fee) && fee < 0) fail('La cotisation ne peut pas être négative.');
+      const id = must(await sb.rpc('create_association', {
+        p_name: name, p_full_name: you, p_phone: val(fd, 'phone'), p_origin_country: val(fd, 'origin_country'), p_region: val(fd, 'region'),
+        p_prefecture: val(fd, 'prefecture'), p_village: val(fd, 'village'), p_residence_country: val(fd, 'residence_country'),
+        p_residence_city: val(fd, 'residence_city'), p_currency: val(fd, 'currency') || 'XOF', p_fee_amount: isNaN(fee) ? 0 : fee, p_fee_due_day: isNaN(due) ? 5 : due
+      }));
+      S.ctx = null; toast('Association créée'); go('#/a/' + id);
+    },
+    async member(fd, form) {
+      const id = form.dataset.id, name = val(fd, 'full_name');
+      if (name.length < 2) fail('Saisissez le nom complet.');
+      if (!id && !fullPlan() && activeMembers().length >= PLANS.association.max) fail('La formule Village est limitée à 50 membres. Passez à la formule Diaspora (Plus → Abonnement).');
+      const email = val(fd, 'email');
+      if (email && !/^\S+@\S+\.\S+$/.test(email)) fail('Adresse email invalide.');
+      const row = { full_name: name, phone: val(fd, 'phone'), city: val(fd, 'city'), country: val(fd, 'country'), email, joined_on: val(fd, 'joined_on') || todayISO() };
+      if (fd.has('section_id')) row.section_id = val(fd, 'section_id') || null;
+      if (fd.has('category_id')) row.category_id = val(fd, 'category_id') || null;
+      if (can('roles') && fd.get('role')) row.role = val(fd, 'role');
+      let mid = id;
+      if (id) {
+        row.active = fd.get('active') === 'on';
+        must(await sb.from('members').update(row).eq('id', id).select('id').single());
+      } else {
+        const dup = S.ctx.members.find(m => m.full_name.toLowerCase() === name.toLowerCase() && digits(m.phone).slice(-9) === digits(row.phone).slice(-9));
+        if (dup) fail('Ce membre existe déjà.');
+        row.association_id = S.ctx.assoc.id;
+        mid = must(await sb.from('members').insert(row).select('id').single()).id;
+      }
+      await refresh(); toast(id ? 'Fiche enregistrée' : 'Membre ajouté'); go(B() + '/m/' + mid);
+    },
+    async import(fd) {
+      if (!fullPlan() && activeMembers().length >= PLANS.association.max) fail('La formule Village est limitée à 50 membres. Passez à la formule Diaspora (Plus → Abonnement).');
+      const rows = parseImport(fd.get('text'));
+      if (!rows.length) fail('Aucun membre reconnu. Mettez un membre par ligne.');
+      if (rows.length > 2000) fail('2 000 membres maximum par import.');
+      const seen = new Set(S.ctx.members.map(m => m.full_name.toLowerCase() + '|' + digits(m.phone).slice(-9)));
+      const joined = val(fd, 'joined_on') || todayISO();
+      const fresh = rows.filter(r => { const k = r.full_name.toLowerCase() + '|' + digits(r.phone).slice(-9); if (seen.has(k)) return false; seen.add(k); return true; })
+        .map(r => ({ ...r, association_id: S.ctx.assoc.id, joined_on: joined, country: S.ctx.assoc.residence_country || '' }));
+      for (let i = 0; i < fresh.length; i += 200) must(await sb.from('members').insert(fresh.slice(i, i + 200)));
+      await refresh();
+      toast(`${fresh.length} membre${fresh.length > 1 ? 's' : ''} importé${fresh.length > 1 ? 's' : ''}${rows.length - fresh.length ? `, ${rows.length - fresh.length} déjà présent${rows.length - fresh.length > 1 ? 's' : ''}` : ''}`);
+      go(B() + '/membres');
+    },
+    async pay(fd) {
+      const mid = val(fd, 'member_id'), period = val(fd, 'period');
+      const m = S.ctx.byId.get(mid); if (!m) fail('Choisissez un membre.');
+      const fee = feeOf(m); if (!fee) fail('Ce membre est dispensé de cotisation.');
+      if (!/^\d{4}-\d{2}$/.test(period)) fail('Choisissez le mois concerné.');
+      const { amount, fx } = readAmount(fd);
+      if (paidFor(mid, period) >= fee) fail(`${pFR(period)} est déjà réglé pour ce membre. Choisissez un autre mois.`);
+      const t = must(await sb.from('transactions').insert({
+        association_id: S.ctx.assoc.id, kind: 'in', category: 'Cotisations', amount, occurred_on: val(fd, 'occurred_on') || todayISO(),
+        description: 'Cotisation de ' + pFR(period), member_id: mid, period, payment_method: val(fd, 'payment_method'), comment: val(fd, 'comment'), ...fx
+      }).select('*').single());
+      await refresh(); toast('Paiement enregistré'); go(B() + '/op/' + t.id + '?recu=1');
+    },
+    async op(fd, form) {
+      const kind = form.dataset.type === 'out' ? 'out' : 'in', colId = val(fd, 'collection_id') || null, mid = val(fd, 'member_id') || null;
+      let desc = val(fd, 'description');
+      if (colId && kind === 'in' && !desc) { if (!mid) fail('Indiquez le nom de la personne qui contribue dans la description.'); desc = 'Contribution de ' + memberName(mid); }
+      const { amount, fx } = readAmount(fd);
+      if (desc.length < 2) fail('Ajoutez une description pour que les membres comprennent l’opération.');
+      if (kind === 'out' && amount > S.ctx.bal.in - S.ctx.bal.out) fail(`Le montant dépasse le solde disponible (${money(S.ctx.bal.in - S.ctx.bal.out)}).`);
+      let proof_path = '';
+      const file = await compress(fd.get('proof'));
+      if (file) {
+        if (file.size > 5 * 1024 * 1024) fail('Le justificatif dépasse 5 Mo. Prenez une photo plus légère.');
+        const ext = file.type === 'application/pdf' ? 'pdf' : (file.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
+        proof_path = `${S.ctx.assoc.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+        must(await sb.storage.from('proofs').upload(proof_path, file, { contentType: file.type, upsert: false }));
+      }
+      if (kind === 'out' && S.ctx.assoc.expense_approval) {
+        const r = must(await sb.from('expense_requests').insert({
+          association_id: S.ctx.assoc.id, category: val(fd, 'category'), amount, occurred_on: val(fd, 'occurred_on') || todayISO(),
+          description: desc, project_id: val(fd, 'project_id') || null, comment: val(fd, 'comment'), proof_path, collection_id: colId, ...fx
+        }).select('id').single());
+        await refresh(); toast('Dépense envoyée pour approbation'); return go(B() + '/depense/' + r.id);
+      }
+      const t = must(await sb.from('transactions').insert({
+        association_id: S.ctx.assoc.id, kind, category: val(fd, 'category'), amount, occurred_on: val(fd, 'occurred_on') || todayISO(),
+        description: desc, project_id: val(fd, 'project_id') || null, payment_method: val(fd, 'payment_method'), comment: val(fd, 'comment'), proof_path, collection_id: colId, member_id: mid, ...fx
+      }).select('*').single());
+      await refresh();
+      if (colId) { toast(kind === 'out' ? 'Remise enregistrée' : 'Contribution enregistrée'); return go(B() + '/collecte/' + colId); }
+      toast(kind === 'out' ? 'Dépense enregistrée' : 'Recette enregistrée'); go(B() + '/op/' + t.id);
+    },
+    async reverse(fd, form) {
+      const reason = val(fd, 'reason');
+      if (reason.length < 4) fail('Indiquez le motif de l’annulation.');
+      const nid = must(await sb.rpc('reverse_transaction', { p_id: Number(form.dataset.id), p_reason: reason }));
+      await refresh(); toast('Contre-écriture enregistrée'); go(B() + '/op/' + nid);
+    },
+    async ppublic(fd, form) {
+      const row = { public_contact: val(fd, 'contact') };
+      if (form.dataset.on !== '1') {
+        const a = new Uint8Array(12); crypto.getRandomValues(a);
+        row.public_slug = Array.from(a, x => 'abcdefghijkmnpqrstuvwxyz23456789'[x % 32]).join('');
+      }
+      must(await sb.from('projects').update(row).eq('id', form.dataset.id).select('id').single());
+      toast(form.dataset.on === '1' ? 'Page mise à jour' : 'Page publique en ligne'); route();
+    },
+    async category(fd, form) {
+      if (!can('categories')) fail('Réservé au président et au vice-président.');
+      const id = form.dataset.id, name = val(fd, 'name'), fee = intVal(fd, 'fee_amount');
+      if (name.length < 2) fail('Donnez un nom à la catégorie.');
+      if (isNaN(fee) || fee < 0) fail('Indiquez la cotisation par mois (0 si dispensée).');
+      if ((S.ctx.cats || []).some(c => c.id !== id && c.name.toLowerCase() === name.toLowerCase())) fail('Une catégorie porte déjà ce nom.');
+      if (id) must(await sb.from('member_categories').update({ name, fee_amount: fee }).eq('id', id).select('id').single());
+      else must(await sb.from('member_categories').insert({ association_id: S.ctx.assoc.id, name, fee_amount: fee }).select('id').single());
+      await refresh(); toast(id ? 'Catégorie enregistrée' : 'Catégorie ajoutée'); await route(); const cc = $('#categories'); if (cc) cc.scrollIntoView({ block: 'start' });
+    },
+    async section(fd, form) {
+      const id = form.dataset.id, name = val(fd, 'name');
+      if (name.length < 2) fail('Donnez un nom à la section.');
+      if ((S.ctx.sections || []).some(x => x.id !== id && x.name.toLowerCase() === name.toLowerCase())) fail('Une section porte déjà ce nom.');
+      const row = { name, city: val(fd, 'city'), country: val(fd, 'country') };
+      if (id) { row.treasurer_member_id = val(fd, 'treasurer_member_id') || null; must(await sb.from('sections').update(row).eq('id', id).select('id').single()); }
+      else { row.association_id = S.ctx.assoc.id; must(await sb.from('sections').insert(row).select('id').single()); }
+      await refresh(); toast(id ? 'Section enregistrée' : 'Section créée'); go(B() + '/sections');
+    },
+    async collection(fd, form) {
+      const id = form.dataset.id, title = val(fd, 'title'), goal = intVal(fd, 'goal'), sug = intVal(fd, 'suggested');
+      if (title.length < 3) fail('Donnez un titre à la collecte.');
+      if (!isNaN(goal) && goal <= 0) fail('L’objectif doit être supérieur à 0, ou laissé vide.');
+      if (!isNaN(sug) && sug <= 0) fail('La participation conseillée doit être supérieure à 0, ou laissée vide.');
+      const row = { title, kind: val(fd, 'kind'), beneficiary: val(fd, 'beneficiary'), description: val(fd, 'description'), goal: isNaN(goal) ? null : goal, suggested: isNaN(sug) ? null : sug, ends_on: val(fd, 'ends_on') || null };
+      let cid = id;
+      if (id) must(await sb.from('collections').update(row).eq('id', id).select('id').single());
+      else { row.association_id = S.ctx.assoc.id; cid = must(await sb.from('collections').insert(row).select('id').single()).id; }
+      toast(id ? 'Collecte enregistrée' : 'Collecte lancée'); go(B() + '/collecte/' + cid);
+    },
+    async rejectexp(fd, form) {
+      const reason = val(fd, 'reason');
+      if (reason.length < 4) fail('Indiquez le motif du refus.');
+      must(await sb.rpc('reject_expense', { p_id: Number(form.dataset.id), p_reason: reason }));
+      await refresh(); toast('Dépense refusée'); route();
+    },
+    async project(fd, form) {
+      const id = form.dataset.id, name = val(fd, 'name'), goal = intVal(fd, 'goal'), start = val(fd, 'start_on'), end = val(fd, 'end_on');
+      if (name.length < 3) fail('Donnez un nom au projet.');
+      if (!(goal > 0)) fail('Indiquez l’objectif financier.');
+      if (end && start && end < start) fail('La fin prévue doit être après le début.');
+      const row = { name, type: val(fd, 'type'), goal, lead_member_id: val(fd, 'lead_member_id') || null, start_on: start || todayISO(), end_on: end || null, description: val(fd, 'description') };
+      let pid = id;
+      if (id) { row.status = val(fd, 'status'); must(await sb.from('projects').update(row).eq('id', id).select('id').single()); }
+      else { row.association_id = S.ctx.assoc.id; row.status = 'En cours'; pid = must(await sb.from('projects').insert(row).select('id').single()).id; }
+      toast(id ? 'Projet enregistré' : 'Projet créé'); go(B() + '/p/' + pid);
+    },
+    async pupdate(fd, form) {
+      const body = val(fd, 'body');
+      if (body.length < 2) fail('Décrivez l’avancement.');
+      must(await sb.from('project_updates').insert({ association_id: S.ctx.assoc.id, project_id: form.dataset.id, body }));
+      toast('Mise à jour publiée'); route();
+    },
+    async message(fd) {
+      let body = val(fd, 'body'); const kind = val(fd, 'kind'), hasVoice = !!(VOICE.msg && (VOICE.msg.blob || VOICE.msg.rec));
+      if (!body && !hasVoice) fail('Écrivez votre message ou enregistrez un vocal.');
+      if (body.length > 1000) fail('1 000 caractères maximum.');
+      const voice = await voiceUpload('msg');
+      if (!body) body = 'Message vocal';
+      must(await sb.from('messages').insert({ association_id: S.ctx.assoc.id, kind: MSG_KINDS.includes(kind) ? kind : 'Message', body, ...voice }));
+      voiceDone('msg'); S.ctx.loadedAt = 0; toast('Message envoyé'); route();
+    },
+    async meeting(fd, form) {
+      const title = val(fd, 'title'), date = val(fd, 'date'), time = val(fd, 'time') || '00:00';
+      if (title.length < 2) fail('Donnez un titre à la réunion.');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}/.test(time)) fail('Choisissez la date et l’heure.');
+      const [y, mo, d] = date.split('-').map(Number), [h, mi] = time.split(':').map(Number);
+      const row = { title, starts_at: new Date(y, mo - 1, d, h, mi).toISOString(), place: val(fd, 'place'), agenda: val(fd, 'agenda') };
+      const id = form.dataset.id;
+      if (id) { must(await sb.from('meetings').update(row).eq('id', id).select('id').single()); toast('Convocation modifiée'); go(B() + '/r/' + id); }
+      else { const r = must(await sb.from('meetings').insert({ association_id: S.ctx.assoc.id, ...row }).select('id').single()); toast('Réunion convoquée'); go(B() + '/r/' + r.id); }
+    },
+    async minutes(fd, form) {
+      const minutes = val(fd, 'minutes');
+      if (minutes.length < 5) fail('Écrivez le compte rendu.');
+      const row = { minutes };
+      if (fd.get('held')) row.status = 'Tenue';
+      must(await sb.from('meetings').update(row).eq('id', form.dataset.id).select('id').single());
+      toast('Compte rendu publié'); go(B() + '/r/' + form.dataset.id);
+    },
+    async poll(fd) {
+      const question = val(fd, 'question');
+      const options = String(fd.get('options') || '').split('\n').map(x => x.trim()).filter(Boolean);
+      if (question.length < 3) fail('Écrivez la question.');
+      if (options.length < 2 || options.length > 10) fail('Mettez entre 2 et 10 choix, un par ligne.');
+      let closes = null; const cd = val(fd, 'close_date');
+      if (cd) { const [y, mo, d] = cd.split('-').map(Number), [h, mi] = (val(fd, 'close_time') || '20:00').split(':').map(Number); closes = new Date(y, mo - 1, d, h, mi); if (closes <= new Date()) fail('La fin du vote doit être dans le futur.'); closes = closes.toISOString(); }
+      const id = must(await sb.rpc('create_poll', { p_assoc: S.ctx.assoc.id, p_question: question, p_description: val(fd, 'description'), p_options: options, p_closes_at: closes, p_anonymous: !!fd.get('anonymous') }));
+      toast('Vote lancé'); go(B() + '/vote/' + id);
+    },
+    async doc(fd) {
+      const title = val(fd, 'title'), category = val(fd, 'category'), file = fd.get('file');
+      if (title.length < 2) fail('Donnez un titre au document.');
+      if (!file || !file.size) fail('Choisissez un fichier.');
+      if (file.size > 10485760) fail('Le fichier dépasse 10 Mo.');
+      const ext = (String(file.name).match(/\.([a-z0-9]{1,5})$/i) || [, 'bin'])[1].toLowerCase();
+      const rnd = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2);
+      const path = `${S.ctx.assoc.id}/${rnd}.${ext}`;
+      must(await sb.storage.from('docs').upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false }));
+      must(await sb.from('documents').insert({ association_id: S.ctx.assoc.id, title, category: DOC_CATS.includes(category) ? category : 'Autre', file_path: path, file_name: String(file.name).slice(0, 200), mime: String(file.type || '').slice(0, 120), size: file.size }));
+      toast('Document ajouté'); route();
+    },
+    async announce(fd) {
+      const title = val(fd, 'title'); let body = val(fd, 'body');
+      const hasVoice = !!(VOICE.ann && (VOICE.ann.blob || VOICE.ann.rec));
+      if (title.length < 2) fail('Ajoutez un titre.');
+      if (body.length < 2 && !hasVoice) fail('Ajoutez un message, écrit ou vocal.');
+      const voice = await voiceUpload('ann');
+      if (body.length < 2) body = 'Annonce vocale';
+      must(await sb.from('announcements').insert({ association_id: S.ctx.assoc.id, kind: val(fd, 'kind'), title, body, ...voice }));
+      voiceDone('ann'); toast('Annonce publiée'); route();
+    },
+    async exempt(fd, form) {
+      const from = val(fd, 'from'), to = val(fd, 'to');
+      if (!/^\d{4}-\d{2}$/.test(from)) fail('Choisissez le mois de début.');
+      if (to && to < from) fail('Le mois de fin doit venir après le mois de début.');
+      must(await sb.rpc('grant_exemption', { p_member: form.dataset.id, p_from: from, p_to: to || null, p_reason: val(fd, 'reason') }));
+      await refresh(); toast('Dispense accordée'); route();
+    },
+    async delacct(fd) {
+      if (val(fd, 'confirm').trim().toUpperCase() !== 'SUPPRIMER') fail('Tapez SUPPRIMER pour confirmer.');
+      must(await sb.rpc('delete_my_account', { p_confirm: 'SUPPRIMER' }));
+      await pushOff(true).catch(() => {}); clearOfflineData();
+      await sb.auth.signOut().catch(() => {});
+      S.ctx = null; S.session = null; S.user = null; S.authMode = 'login';
+      S.authMsg = 'Votre compte VillageLink a été supprimé. Merci de l’avoir utilisé.';
+      location.hash = '#/'; renderAuth();
+    },
+    async exend(fd) {
+      const last = val(fd, 'last'); if (!/^\d{4}-\d{2}$/.test(last)) fail('Choisissez le dernier mois dispensé.');
+      must(await sb.rpc('end_exemption', { p_id: Number(val(fd, 'id')), p_last: last }));
+      await refresh(); toast('Dispense terminée'); route();
+    },
+    async subreq(fd) {
+      const plan = val(fd, 'plan'), months = Number(val(fd, 'months')), p = PLANS[plan];
+      if (!p || ![1, 12].includes(months)) fail('Choisissez une formule et une durée.');
+      const ref = val(fd, 'reference'); if (ref.length < 6) fail('Recopiez la référence du paiement Wave (ID de transaction, commence par T_).');
+      must(await sb.rpc('request_subscription', { p_assoc: S.ctx.assoc.id, p_plan: plan, p_months: months, p_amount: months === 12 ? p.year : p.month, p_reference: ref }));
+      toast('Paiement déclaré. VillageLink va l’activer.'); route();
+    },
+    async ownreject(fd, form) {
+      const note = val(fd, 'note'); if (note.length < 3) fail('Indiquez le motif.');
+      must(await sb.rpc('owner_reject', { p_request: Number(form.dataset.id), p_note: note }));
+      toast('Demande refusée'); renderAdmin();
+    },
+    async ownblock(fd, form) {
+      const note = val(fd, 'note'); if (note.length < 3) fail('Indiquez le motif.');
+      must(await sb.rpc('owner_block', { p_assoc: form.dataset.id, p_reason: note }));
+      toast('Association bloquée'); renderAdmin();
+    },
+    async claim(fd) {
+      const me = S.ctx.me, period = val(fd, 'period'), amount = Math.round(Number(val(fd, 'amount')));
+      if (!/^\d{4}-\d{2}$/.test(period)) fail('Choisissez le mois à payer.');
+      if (!(amount > 0)) fail('Saisissez le montant envoyé.');
+      const method = val(fd, 'method'); if (!method) fail('Choisissez Wave, Orange Money ou Free Money.');
+      must(await sb.rpc('declare_payment', { p_member: me.id, p_period: period, p_amount: amount, p_method: method, p_reference: val(fd, 'reference') }));
+      await refresh(); toast('Paiement déclaré. Le trésorier va le confirmer.'); route();
+    },
+    async paynums(fd) {
+      if (!canSetPayNums()) fail('Réservé au président et au trésorier.');
+      const clean = k => val(fd, k).replace(/[^\d+ ]/g, '').trim();
+      for (const k of ['wave', 'orange', 'free']) { const v = clean(k); if (v && digits(v).length < 8) fail('Un numéro semble incomplet. Vérifiez-le.'); }
+      const link = val(fd, 'wave_link').split(/[?#]/)[0];
+      if (link && !clean('wave')) fail('Ajoutez aussi le numéro Wave qui reçoit l’argent (il sert de preuve).');
+      if (link && !/^https:\/\/pay\.wave\.com\/m\/[A-Za-z0-9_-]{4,40}\/c\/[a-z]{2}\/?$/.test(link)) fail('Le lien Wave doit commencer par https://pay.wave.com/m/ (copiez-le depuis Wave : Envoi de lien).');
+      must(await sb.rpc('set_pay_numbers', { p_assoc: S.ctx.assoc.id, p_holder: val(fd, 'holder'), p_wave: clean('wave'), p_orange: clean('orange'), p_free: clean('free'), p_wave_link: link }));
+      await refresh(); toast('Numéros enregistrés'); route();
+    },
+    async rejectclaim(fd, form) {
+      const reason = val(fd, 'reason'); if (reason.length < 3) fail('Indiquez pourquoi (par exemple : rien reçu sur Wave).');
+      must(await sb.rpc('reject_payment_claim', { p_id: Number(form.dataset.id), p_reason: reason }));
+      await refresh(); toast('Paiement refusé'); route();
+    },
+    async assoc(fd) {
+      if (!can('settings')) fail('Réservé au président.');
+      const fee = intVal(fd, 'fee_amount'), due = intVal(fd, 'fee_due_day'), start = val(fd, 'dues_start');
+      if (val(fd, 'name').length < 3) fail('Le nom est trop court.');
+      if (isNaN(fee) || fee < 0) fail('Montant de cotisation invalide.');
+      if (isNaN(due) || due < 1 || due > 28) fail('Le jour d’échéance doit être entre 1 et 28.');
+      if (!/^\d{4}-\d{2}$/.test(start)) fail('Choisissez le mois de début du suivi.');
+      const row = { fee_amount: fee, fee_due_day: due, dues_start: start + '-01', currency: val(fd, 'currency'), founded_on: val(fd, 'founded_on') || null, expense_approval: fd.get('expense_approval') === 'on' };
+      ['name', 'village', 'origin_country', 'region', 'prefecture', 'residence_city', 'residence_country', 'description'].forEach(k => { row[k] = val(fd, k); });
+      must(await sb.from('associations').update(row).eq('id', S.ctx.assoc.id).select('id').single());
+      await refresh(); toast('Association enregistrée'); route();
+    }
+  };
+
+  /* ------------------------------------------------------------------
+     Événements
+  ------------------------------------------------------------------ */
+  document.addEventListener('submit', async e => {
+    const f = e.target.closest('form[data-form]'); if (!f) return;
+    e.preventDefault();
+    const btn = f.querySelector('button[type=submit]'), err = f.querySelector('.err');
+    if (btn) btn.disabled = true; if (err) err.hidden = true;
+    try { await FORMS[f.dataset.form](new FormData(f), f); }
+    catch (x) { if (x instanceof Error && !x.user) console.error(x); if (err) { err.textContent = errMsg(x); err.hidden = false; } else toast(errMsg(x)); }
+    finally { if (btn && btn.isConnected) btn.disabled = false; }
+  });
+
+  document.addEventListener('click', async e => {
+    const b = e.target.closest('[data-act]'); if (!b) return;
+    const act = b.dataset.act;
+    try {
+      if (act === 'auth-mode') { S.authMode = b.dataset.mode; S.authMsg = ''; renderAuth(); }
+      else if (act === 'google') {
+        b.disabled = true;
+        const r = await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: location.origin + location.pathname } });
+        if (r.error) { b.disabled = false; throw r.error; }
+      }
+      else if (act === 'signout') { await pushOff(true).catch(() => {}); clearOfflineData(); await sb.auth.signOut(); S.ctx = null; S.authMode = 'login'; S.authMsg = ''; S.session = null; S.user = null; location.hash = '#/'; renderAuth(); }
+      else if (act === 'reload') location.reload();
+      else if (act === 'own-act') { must(await sb.rpc('owner_activate', { p_request: Number(b.dataset.id), p_until: b.dataset.until })); toast('Abonnement activé jusqu’au ' + dFR(b.dataset.until)); renderAdmin(); }
+      else if (act === 'own-rej') { const f = document.getElementById('orj-' + b.dataset.id); if (f) f.hidden = false; }
+      else if (act === 'own-block') { const f = document.getElementById('obk-' + b.dataset.id); if (f) f.hidden = false; }
+      else if (act === 'own-unblock') { must(await sb.rpc('owner_unblock', { p_assoc: b.dataset.id })); toast('Association débloquée'); renderAdmin(); }
+      else if (act === 'own-trial') { must(await sb.rpc('owner_set_dates', { p_assoc: b.dataset.id, p_trial_ends: plusDays([b.dataset.te, todayISO()].sort().pop(), 30), p_paid_until: b.dataset.pu || null })); toast('Essai prolongé de 30 jours'); renderAdmin(); }
+      else if (act === 'theme') { store.set('vl:theme', b.dataset.theme); applyTheme(); route(); }
+      else if (act === 'lang') { store.set('vl:lang', b.dataset.lang); if (b.dataset.lang === 'fr' && langNow() === 'fr') { location.reload(); return; } applyLang(); route(); }
+      else if (act === 'hidemsg') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer le masquage'; return; }
+        must(await sb.rpc('hide_message', { p_id: Number(b.dataset.id) }));
+        toast('Message masqué'); route();
+      }
+      else if (act === 'meetstatus') {
+        const s2 = b.dataset.status;
+        if (s2 === 'Annulée' && b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer l’annulation'; return; }
+        must(await sb.from('meetings').update({ status: s2 }).eq('id', b.dataset.id).select('id').single());
+        toast(s2 === 'Tenue' ? 'Réunion marquée comme tenue' : s2 === 'Annulée' ? 'Réunion annulée' : 'Réunion remise en prévue'); route();
+      }
+      else if (act === 'attend') {
+        const row = b.closest('[data-mid]'), v = b.dataset.v === '1', on = b.getAttribute('aria-pressed') === 'true';
+        row.querySelectorAll('[data-act=attend]').forEach(x => { x.disabled = true; });
+        try {
+          if (on) must(await sb.from('meeting_attendance').delete().eq('meeting_id', b.dataset.meet).eq('member_id', b.dataset.id));
+          else must(await sb.from('meeting_attendance').upsert({ meeting_id: b.dataset.meet, member_id: b.dataset.id, association_id: S.ctx.assoc.id, present: v }, { onConflict: 'meeting_id,member_id' }));
+          row.querySelectorAll('[data-act=attend]').forEach(x => x.setAttribute('aria-pressed', String(!on && x === b)));
+          const att = must(await sb.from('meeting_attendance').select('*').eq('meeting_id', b.dataset.meet));
+          const c = $('#att-count'); if (c) c.innerHTML = attCount(att);
+        } finally { row.querySelectorAll('[data-act=attend]').forEach(x => { x.disabled = false; }); }
+      }
+      else if (act === 'memberactive') {
+        const on = b.dataset.v === '1';
+        if (!on && b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer : retirer ce membre'; return; }
+        b.disabled = true;
+        must(await sb.from('members').update({ active: on }).eq('id', b.dataset.id).select('id').single());
+        await refresh(); toast(on ? 'Membre réintégré' : 'Membre retiré de l’association'); go(B() + (on ? '/m/' + b.dataset.id : '/membres'));
+      }
+      else if (act === 'vote') {
+        b.disabled = true;
+        must(await sb.rpc('cast_vote', { p_poll: b.dataset.poll, p_option: b.dataset.opt }));
+        toast('Vote enregistré'); route();
+      }
+      else if (act === 'closepoll') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer : clore le vote'; return; }
+        must(await sb.rpc('close_poll', { p_poll: b.dataset.id }));
+        toast('Vote clos'); route();
+      }
+      else if (act === 'opendoc') {
+        const box = $('#doc-open'); if (box) box.innerHTML = '<p class="muted">Ouverture du document…</p>';
+        const r = must(await sb.storage.from('docs').createSignedUrl(b.dataset.path, 3600));
+        if (box) box.innerHTML = `<a class="btn primary block" target="_blank" rel="noopener" href="${esc(r.signedUrl)}">Ouvrir « ${esc(b.textContent)} »</a>`;
+        if (box) box.scrollIntoView({ block: 'center' });
+      }
+      else if (act === 'deldoc') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Retirer ?'; b.classList.add('confirm'); return; }
+        must(await sb.from('documents').delete().eq('id', b.dataset.id));
+        await sb.storage.from('docs').remove([b.dataset.path]);
+        toast('Document retiré'); route();
+      }
+      else if (act === 'print') { window.print(); }
+      else if (act === 'pushon') { b.disabled = true; try { await pushOn(); toast('Rappels activés sur ce téléphone'); } finally { drawPush(); } }
+      else if (act === 'pushoff') { b.disabled = true; try { await pushOff(false); toast('Rappels désactivés'); } finally { drawPush(); } }
+      else if (act === 'pushtest') { b.disabled = true; try { await pushTest(); toast('Notification envoyée'); } finally { b.disabled = false; } }
+      else if (act === 'rec') { await voiceToggle(b.dataset.key); }
+      else if (act === 'recdel') { voiceDone(b.dataset.key); voiceDraw(b.dataset.key); }
+      else if (act === 'play') {
+        b.disabled = true; b.textContent = 'Chargement…';
+        const r = must(await sb.storage.from('voice').createSignedUrl(b.dataset.path, 3600));
+        const au = document.createElement('audio'); au.controls = true; au.autoplay = true; au.preload = 'auto'; au.src = r.signedUrl;
+        b.replaceWith(au); au.play().catch(() => {});
+      }
+      else if (act === 'unpublish') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer : le lien ne marchera plus'; return; }
+        must(await sb.from('projects').update({ public_slug: null }).eq('id', b.dataset.id).select('id').single());
+        toast('Page publique retirée'); route();
+      }
+      else if (act === 'delcat') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Supprimer ?'; b.classList.add('confirm'); return; }
+        must(await sb.from('member_categories').delete().eq('id', b.dataset.id));
+        await refresh(); toast('Catégorie supprimée : ses membres paient la cotisation générale'); await route(); const cc = $('#categories'); if (cc) cc.scrollIntoView({ block: 'start' });
+      }
+      else if (act === 'delsection') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer la suppression'; return; }
+        must(await sb.from('sections').delete().eq('id', b.dataset.id));
+        await refresh(); toast('Section supprimée'); go(B() + '/sections');
+      }
+      else if (act === 'colstatus') {
+        const st = b.dataset.status;
+        if (st === 'Close' && b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer : clore la collecte'; return; }
+        must(await sb.from('collections').update({ status: st }).eq('id', b.dataset.id).select('id').single());
+        toast(st === 'Close' ? 'Collecte close' : 'Collecte rouverte'); route();
+      }
+      else if (act === 'copy') {
+        try { await navigator.clipboard.writeText(b.dataset.v); toast('Copié'); } catch (err) { toast(b.dataset.v); }
+      }
+      else if (act === 'claim-ok') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Oui, l’argent est bien arrivé'; return; }
+        b.disabled = true;
+        const tid = must(await sb.rpc('confirm_payment_claim', { p_id: Number(b.dataset.id) }));
+        await refresh(); toast('Paiement confirmé'); go(B() + '/op/' + tid + '?recu=1');
+      }
+      else if (act === 'ex-end') { const f = $('#exend'); if (f) { f.hidden = false; f.querySelector('[name=id]').value = b.dataset.id; const l = f.querySelector('[name=last]'); l.min = b.dataset.from; if (l.value < b.dataset.from) l.value = b.dataset.from; l.focus(); } }
+      else if (act === 'claim-no') { const f = $('#rjc-' + b.dataset.id); if (f) { f.hidden = false; f.querySelector('input').focus(); } }
+      else if (act === 'claim-cancel') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer l’annulation'; return; }
+        b.disabled = true;
+        must(await sb.rpc('cancel_payment_claim', { p_id: Number(b.dataset.id) }));
+        await refresh(); toast('Déclaration annulée'); route();
+      }
+      else if (act === 'approveexp') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer : la dépense sort de la caisse'; return; }
+        b.disabled = true;
+        const tid = must(await sb.rpc('approve_expense', { p_id: Number(b.dataset.id) }));
+        await refresh(); toast('Dépense approuvée'); go(B() + '/op/' + tid);
+      }
+      else if (act === 'cancelexp') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer le retrait'; return; }
+        b.disabled = true;
+        must(await sb.rpc('cancel_expense', { p_id: Number(b.dataset.id) }));
+        await refresh(); toast('Proposition retirée'); route();
+      }
+      else if (act === 'review') {
+        const ok = b.dataset.ok === '1';
+        if (!ok && b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer le refus'; return; }
+        b.disabled = true;
+        must(await sb.rpc('review_join', { p_member: b.dataset.id, p_accept: ok }));
+        await refresh(); toast(ok ? 'Adhésion validée' : 'Demande refusée'); route();
+      }
+      else if (act === 'proof') {
+        const box = $('#proof-box'); box.innerHTML = '<span class="muted">Chargement…</span>';
+        const r = must(await sb.storage.from('proofs').createSignedUrl(b.dataset.path, 3600));
+        box.innerHTML = /\.pdf$/i.test(b.dataset.path) ? `<a class="btn ghost sm" target="_blank" rel="noopener" href="${esc(r.signedUrl)}">Ouvrir le PDF</a>` : `<a href="${esc(r.signedUrl)}" target="_blank" rel="noopener"><img class="proof-img" src="${esc(r.signedUrl)}" alt="Justificatif"></a>`;
+      } else if (act === 'newcode') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer : l’ancien code ne marchera plus'; b.classList.add('danger'); return; }
+        must(await sb.rpc('regenerate_invite_code', { p_assoc: S.ctx.assoc.id }));
+        await refresh(); toast('Nouveau code créé'); route();
+      }
+    } catch (x) { console.error(x); toast(errMsg(x)); }
+  });
+
+  /* Mode hors ligne : un service worker garde une copie de l'application et des dernières données lues. */
+  function clearOfflineData() {
+    try { if (navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage('vl-clear'); } catch (e) { /* rien */ }
+    try { if (window.caches) caches.delete('vl-data-v1'); } catch (e) { /* rien */ }
+  }
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === '127.0.0.1')) {
+    window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* hors ligne indisponible */ }); });
+  }
+  const setOnline = () => $('#offline').classList.toggle('hidden', navigator.onLine);
+  window.addEventListener('online', setOnline); window.addEventListener('offline', setOnline); setOnline();
+  document.addEventListener('change', e => { const el = e.target; if (el && el.dataset && el.dataset.nav === 'rapport' && /^\d{4}-\d{2}$/.test(el.value)) go(B() + '/rapport?m=' + el.value); });
+  const onScroll = () => document.body.classList.toggle('scrolled', window.scrollY > 8);
+  window.addEventListener('scroll', onScroll, { passive: true }); window.addEventListener('hashchange', () => setTimeout(onScroll, 50));
+  window.addEventListener('hashchange', route);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !S.session) return;
+    if (S.ctx) S.ctx.loadedAt = 0;
+    // On ne réaffiche pas une page avec un formulaire : la saisie en cours serait perdue.
+    if (!document.querySelector('#view form[data-form]')) route();
+  });
+
+  /* ------------------------------------------------------------------
+     Session
+  ------------------------------------------------------------------ */
+  let started = false;
+  sb.auth.onAuthStateChange((event, session) => {
+    const had = !!S.session;
+    S.session = session; S.user = session ? session.user : null;
+    if (event === 'PASSWORD_RECOVERY') { location.hash = '#/mot-de-passe'; return; }
+    if (!started) return;
+    if (event === 'SIGNED_IN' && !had) route();
+    // Ne pas réafficher l'écran de connexion s'il est déjà là : la saisie en cours serait effacée.
+    if (event === 'SIGNED_OUT') { clearOfflineData(); S.ctx = null; if (!document.querySelector('form[data-form=auth]')) renderAuth(); }
+  });
+  (async () => {
+    try {
+      const { data } = await sb.auth.getSession();
+      S.session = data.session; S.user = data.session ? data.session.user : null;
+    } catch (e) { console.error(e); }
+    if (/^#access_token=/.test(location.hash)) history.replaceState(null, '', location.pathname + (S.session ? '#/' : ''));
+    started = true;
+    route();
+  })();
+
+  window.__VL = { parseImport, monthsBetween, addMonth };
+})();

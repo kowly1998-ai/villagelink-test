@@ -1,0 +1,15 @@
+/* Pages légales VillageLink — design v2 : fond clair, une seule couleur de marque */
+:root{--bg:#F5F6F8;--surface:#FFFFFF;--ink:#14161B;--muted:#5B6373;--accent:#1B3A8C;--line:#D9DDE5}
+@media (prefers-color-scheme:dark){:root{--bg:#0E1320;--surface:#161D2D;--ink:#F1F3F8;--muted:#A2ABC0;--accent:#8FA9F5;--line:#2B3550}}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{margin:0;min-height:100vh;color:var(--ink);background:var(--bg);font:16px/1.65 "Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:740px;margin:0 auto;padding:28px 16px 60px}
+.brand{display:flex;align-items:center;gap:12px;text-decoration:none;color:var(--ink);font-weight:700;font-size:19px}
+.brand img{width:40px;height:40px;border-radius:10px}
+h1{font-size:28px;line-height:1.2;margin:24px 0 4px}
+h2{font-size:18px;margin:22px 0 6px}
+p,li{color:var(--ink)}.muted{color:var(--muted);font-size:14px}
+a{color:var(--accent);font-weight:600}
+section{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:4px 20px 16px;margin-top:16px}
+ul,ol{padding-left:20px}
