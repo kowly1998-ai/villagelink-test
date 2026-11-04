@@ -146,7 +146,8 @@
     collections: ['president', 'vice_president', 'secretaire', 'tresorier'],
     sections: ['president', 'vice_president', 'secretaire'],
     categories: ['president', 'vice_president'],
-    settings: ['president']
+    settings: ['president'],
+    cover: ['president', 'vice_president', 'secretaire']
   };
   /* Essai gratuit et abonnement --------------------------------------- */
   const PLANS = { association: { label: 'Village', max: 50, month: 5000, year: 50000 }, federation: { label: 'Diaspora', max: 200, month: 10000, year: 100000 } };
@@ -233,6 +234,23 @@
     return S.ctx;
   }
   const refresh = () => loadCtx(S.ctx.assoc.id);
+  /* Photo de couverture : réduite sur le téléphone avant l'envoi (environ 150 Ko) */
+  async function shrinkImage(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((ok, ko) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => ko(new Error('Photo illisible. Essayez une autre photo (JPG ou PNG).')); i.src = url; });
+      const w = Math.min(1280, img.naturalWidth), h = Math.round(img.naturalHeight * w / img.naturalWidth);
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      let blob = await new Promise(ok => c.toBlob(ok, 'image/jpeg', 0.78));
+      if (blob && blob.size > 350000) blob = await new Promise(ok => c.toBlob(ok, 'image/jpeg', 0.6));
+      return blob;
+    } finally { URL.revokeObjectURL(url); }
+  }
+  async function coverUrl(a) {
+    if (!a || !a.cover_path) return '';
+    try { const r = await sb.storage.from('covers').createSignedUrl(a.cover_path, 3600); return (r.data && r.data.signedUrl) || ''; } catch (e) { return ''; }
+  }
   const paidFor = (mid, p) => S.ctx.paidMap.get(mid + '|' + p) || 0;
   // Cotisation mensuelle d'un membre : celle de sa catégorie, sinon la cotisation générale.
   const catOf = m => (m && m.category_id ? (S.ctx.cats || []).find(c => c.id === m.category_id) : null) || null;
@@ -610,6 +628,8 @@
     const first = String(me.full_name || '').split(/\s+/)[0];
     const monthName = pFR(cur).replace(/^./, c => c.toUpperCase());
 
+    const cvUrl = await coverUrl(a);
+    const coverBanner = cvUrl ? `<div class="cover"><img src="${esc(cvUrl)}" alt="" loading="lazy"><div class="cover-t">${esc(a.name)}</div></div>` : '';
     const greet = `<div class="greet"><h1>Bonjour ${esc(first)}</h1><p>${esc(ROLES[me.role])} · ${dFR(todayISO())}</p></div>`;
     const todo = (href, ico, t, s, warn) => `<a class="todo${warn ? ' warn' : ''}" href="${href}"><span class="ico-tile">${ico}</span><span class="body" style="flex:1;min-width:0"><span class="tt" style="display:block">${t}</span><span class="ss" style="display:block">${s}</span></span><span class="chev">${I.chev}</span></a>`;
     // Ma cotisation (chacun voit d'abord SA situation)
@@ -652,7 +672,7 @@
     if (pres) { L = [greet, presCash, status, todos, where, monthCard]; R = [projCard, pollCard, meetCard, colCards, opsCard, actCard]; }
     else if (trea) { L = [greet, status, todos, monthCard, shortcuts, pollCard, meetCard, colCards]; R = [cash, lateCard, opsCard, projCard, actCard]; }
     else { L = [greet, status, todos, cash, pollCard, meetCard, colCards, projCard]; R = [opsCard, actCard]; }
-    return `<div class="home-grid"><div class="home-l">${L.join('')}</div><div class="home-r">${R.join('')}</div></div>`;
+    return `${coverBanner}<div class="home-grid"><div class="home-l">${L.join('')}</div><div class="home-r">${R.join('')}</div></div>`;
   };
 
   // Vie de l'association : le point d'entrée des annonces, de la discussion, des réunions, des votes et des documents
@@ -1896,11 +1916,17 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
     const a = S.ctx.assoc, pres = can('settings');
     const invite = `Rejoignez « ${a.name} » sur VillageLink pour suivre les cotisations et les projets du village.\n\n1. Ouvrez ${location.origin + location.pathname}\n2. Créez votre compte\n3. Entrez le code : ${a.invite_code}`;
     const ro = pres ? '' : 'disabled';
+    const cvPrev = can('cover') ? await coverUrl(a) : '';
     return `${subHead('Association', B() + '/plus')}
       <section class="card stack"><h2>Code d’invitation</h2><p class="muted" style="margin:0;font-size:13.5px">Les membres créent leur compte puis entrent ce code. Ceux que le trésorier a déjà inscrits retrouvent leur historique grâce à leur numéro de téléphone.</p>
         <div class="code">${esc(a.invite_code)}</div>
         <a class="btn wa block" target="_blank" rel="noopener" href="${waShare(invite)}">${I.wa} Envoyer l’invitation sur WhatsApp</a>
         ${pres ? '<button class="btn ghost sm" data-act="newcode">Changer le code</button>' : ''}</section>
+      ${can('cover') ? `<form class="card stack" data-form="cover" novalidate><h2>Photo de couverture</h2><p class="muted" style="margin:0;font-size:13.5px">Elle s’affiche en haut de l’accueil pour tous les membres. Choisissez une belle photo du village.</p>
+        ${cvPrev ? `<div class="cover cover-sm"><img src="${esc(cvPrev)}" alt=""></div>` : ''}
+        <div class="field"><label for="cv-f">${cvPrev ? 'Changer la photo' : 'Choisir une photo'}</label><input id="cv-f" name="file" type="file" accept="image/*"></div>
+        <button class="btn primary block" type="submit">Enregistrer la photo</button>
+        ${cvPrev ? '<button class="btn ghost sm" type="button" data-act="coverdel">Retirer la photo</button>' : ''}</form>` : ''}
       ${catsCard()}
       ${mmCard()}
       <form class="stack" data-form="assoc" novalidate>
@@ -2175,6 +2201,20 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       const id = must(await sb.rpc('create_poll', { p_assoc: S.ctx.assoc.id, p_question: question, p_description: val(fd, 'description'), p_options: options, p_closes_at: closes, p_anonymous: !!fd.get('anonymous') }));
       toast('Vote lancé'); go(B() + '/vote/' + id);
     },
+    async cover(fd) {
+      if (!can('cover')) fail('Réservé au président, au vice-président et au secrétaire.');
+      const file = fd.get('file');
+      if (!file || !file.size) fail('Choisissez une photo.');
+      const blob = await shrinkImage(file);
+      if (!blob || blob.size > 2097152) fail('Photo trop lourde. Essayez-en une autre.');
+      const a = S.ctx.assoc, old = a.cover_path;
+      const rnd = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2);
+      const path = `${a.id}/cover-${rnd}.jpg`;
+      must(await sb.storage.from('covers').upload(path, blob, { contentType: 'image/jpeg', upsert: false }));
+      must(await sb.rpc('set_cover', { p_assoc: a.id, p_path: path }));
+      if (old) { try { await sb.storage.from('covers').remove([old]); } catch (e) { /* ancienne photo : sans importance */ } }
+      await refresh(); toast('Photo enregistrée'); route();
+    },
     async doc(fd) {
       const title = val(fd, 'title'), category = val(fd, 'category'), file = fd.get('file');
       if (title.length < 2) fail('Donnez un titre au document.');
@@ -2428,6 +2468,12 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
         const box = $('#proof-box'); box.innerHTML = '<span class="muted">Chargement…</span>';
         const r = must(await sb.storage.from('proofs').createSignedUrl(b.dataset.path, 3600));
         box.innerHTML = /\.pdf$/i.test(b.dataset.path) ? `<a class="btn ghost sm" target="_blank" rel="noopener" href="${esc(r.signedUrl)}">Ouvrir le PDF</a>` : `<a href="${esc(r.signedUrl)}" target="_blank" rel="noopener"><img class="proof-img" src="${esc(r.signedUrl)}" alt="Justificatif"></a>`;
+      } else if (act === 'coverdel') {
+        if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer : retirer la photo'; b.classList.add('danger'); return; }
+        const old = S.ctx.assoc.cover_path;
+        must(await sb.rpc('set_cover', { p_assoc: S.ctx.assoc.id, p_path: null }));
+        if (old) { try { await sb.storage.from('covers').remove([old]); } catch (e) { /* sans importance */ } }
+        await refresh(); toast('Photo retirée'); route();
       } else if (act === 'newcode') {
         if (b.dataset.confirm !== '1') { b.dataset.confirm = '1'; b.textContent = 'Confirmer : l’ancien code ne marchera plus'; b.classList.add('danger'); return; }
         must(await sb.rpc('regenerate_invite_code', { p_assoc: S.ctx.assoc.id }));
