@@ -1999,6 +1999,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       if (code.length < 4) fail('Saisissez le code d’invitation.');
       if (name.length < 2) fail('Saisissez votre nom complet.');
       const id = must(await sb.rpc('join_association', { p_code: code, p_full_name: name, p_phone: val(fd, 'phone') }));
+      if (!id) fail('Code d’invitation inconnu. Vérifiez-le auprès du bureau.');
       S.ctx = null;
       const mine = must(await sb.rpc('my_memberships')).find(a => a.association_id === id);
       if (mine && mine.pending) { toast('Demande envoyée au bureau'); return renderWelcome(); }
