@@ -130,7 +130,7 @@ async function main() {
       await page.fill('.lock-in', '1234'); await page.click('.lock button[type=submit]'); await page.waitForTimeout(1200);
       check(await page.locator('.lock').count() === 0, 'le bon code déverrouille');
     }
-    check(errors.length === 0, 'aucune erreur de code dans le navigateur + (errors.length ? ' : ' + errors.slice(0, 3).join(' | ') : ''));
+    check(errors.length === 0, 'aucune erreur de code dans le navigateur' + (errors.length ? ' : ' + errors.slice(0, 3).join(' | ') : ''));
     await ctx.close();
   }
   await browser.close(); srv.close();
