@@ -478,3 +478,12 @@ table.sheet.num td:not(:first-child),table.sheet.num th:not(:first-child){text-a
   table.sheet th,table.sheet td{border:1px solid #888;padding:10px 8px;color:#111;background:#fff!important}
   table.sheet tr{break-inside:avoid}
 }
+
+/* v2.2.3 : grands chiffres, longs mots, tableau du rapport annuel */
+.big.num.lg{font-size:28px}
+.big.num.xl{font-size:22px}
+.card p,.card h2,.card h3{overflow-wrap:break-word}
+.sheet-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.sheet-wrap table.sheet td,.sheet-wrap table.sheet th{white-space:nowrap}
+@media (max-width:480px){.sheet-wrap table.sheet th,.sheet-wrap table.sheet td{padding:10px 8px}}
+@media print{.sheet-wrap{overflow:visible}}

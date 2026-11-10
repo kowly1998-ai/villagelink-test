@@ -34,6 +34,8 @@
   const nf = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 0 });
   const CUR_LABEL = { XOF: 'FCFA', XAF: 'FCFA', GNF: 'GNF', EUR: '€', USD: '$', CAD: '$ CA', GBP: '£' };
   const num = n => nf.format(Math.round(Number(n) || 0)).replace(/[   ]/g, NB);
+  // Grand chiffre trop long pour l'écran (souvent en GNF) : taille réduite.
+  const fit = n => { const l = num(n).length; return l >= 16 ? ' xl' : l >= 12 ? ' lg' : ''; };
   const money = (n, cur) => num(n) + NB + (CUR_LABEL[cur || (S.ctx && S.ctx.assoc.currency)] || 'FCFA');
   const moneyW = n => money(n).replace(/\u00a0(\S+)$/, ' $1');
   const nf2 = new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 2 });
@@ -639,7 +641,7 @@
       if (due > 0 || pend) {
         status = `<section class="card status-card${d.isLate ? ' late' : ''}"><div class="between"><span class="eyebrow">Ma cotisation · ${esc(monthName)}</span>${pend && !due ? '<span class="pill p-late">En attente de confirmation</span>' : d.isLate ? '<span class="pill p-late">En retard</span>' : '<span class="pill p-blue">À payer</span>'}</div>
           ${pend && !due ? '<div class="big" style="font-size:26px">Paiement déclaré</div><span class="muted">Le trésorier va le confirmer.</span>'
-            : `<div><div class="muted" style="font-size:15px">Vous devez</div><div class="big num">${num(due)}<small>${CURL}</small></div><div class="muted" style="font-size:15px;margin-top:4px">${d.isLate ? d.late.length + ' mois en retard' : 'à payer avant le ' + dFR(cur + '-' + pad(a.fee_due_day))}</div></div>`}
+            : `<div><div class="muted" style="font-size:15px">Vous devez</div><div class="big num${fit(due)}">${num(due)}<small>${CURL}</small></div><div class="muted" style="font-size:15px;margin-top:4px">${d.isLate ? d.late.length + ' mois en retard' : 'à payer avant le ' + dFR(cur + '-' + pad(a.fee_due_day))}</div></div>`}
           ${canPay ? `<a class="btn primary block" href="${B()}/payer">${I.wallet} ${pend && !due ? 'Voir mon paiement' : 'Payer ma cotisation'}</a>` : (due > 0 ? '<span class="help">Remettez votre cotisation au trésorier.</span>' : '')}</section>`;
       } else if (!pres && !trea) {
         status = `<section class="card status-card ok"><div class="between"><span class="eyebrow">Ma cotisation · ${esc(monthName)}</span><span class="pill p-ok">À jour</span></div><div class="big" style="font-size:28px">Vous êtes à jour</div><span class="muted">Merci ! Votre cotisation est payée.</span></section>`;
@@ -654,10 +656,10 @@
       act.length <= 1 && can('members') ? todo(`${B()}/membres/import`, I.list, 'Ajoutez la liste des membres', 'Collez-la depuis votre cahier, Excel ou WhatsApp.', false) : ''
     ].join('');
     const monthCard = fee && (pres || trea) && dueNow.length ? `<section class="card stack"><div class="between"><span class="eyebrow">${esc(monthName)}</span><b class="num">${paidCount} sur ${dueNow.length} ont payé</b></div><div class="bar"><i style="width:${pct(collected, expected)}%"></i></div><span class="muted num" style="font-size:14px">${money(collected)} sur ${money(expected)} collectés</span></section>` : '';
-    const presCash = `<section class="card hero"><span class="eyebrow">Dans la caisse</span><div class="big num">${num(solde)} <span class="cur">${CURL}</span></div>
+    const presCash = `<section class="card hero"><span class="eyebrow">Dans la caisse</span><div class="big num${fit(solde)}">${num(solde)} <span class="cur">${CURL}</span></div>
       <div class="boxes num"><div><small>Entrées ce mois</small><b>+ ${money(inMonth)}</b></div><div><small>Sorties ce mois</small><b>− ${money(outMonth)}</b></div></div>
       <div class="foot"><span>${act.length} membre${act.length > 1 ? 's' : ''} · vérifiable par tous</span><a href="${B()}/transparence">Où va l’argent</a></div></section>`;
-    const cash = `<section class="card stack"><span class="eyebrow">Dans la caisse de l’association</span><div class="status-card"><div class="big num">${num(solde)}<small>${CURL}</small></div></div><a class="link" href="${B()}/transparence">Voir où va l’argent ${I.chev}</a></section>`;
+    const cash = `<section class="card stack"><span class="eyebrow">Dans la caisse de l’association</span><div class="status-card"><div class="big num${fit(solde)}">${num(solde)}<small>${CURL}</small></div></div><a class="link" href="${B()}/transparence">Voir où va l’argent ${I.chev}</a></section>`;
     const outs = catTot.filter(c => c.kind === 'out' && Number(c.total) > 0).sort((x, y) => y.total - x.total).slice(0, 4), maxOut = outs[0] ? Number(outs[0].total) : 0;
     const where = outs.length ? `<section class="card stack"><div class="between"><h2>Où va l’argent</h2><a class="link" href="${B()}/transparence">Détail</a></div><div class="cat-list">${outs.map(c => `<div><div class="l"><span>${esc(c.category)}</span><b class="num">${money(c.total)}</b></div><div class="bar"><i style="width:${pct(c.total, maxOut)}%"></i></div></div>`).join('')}</div></section>` : '';
     const outIco = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>';
@@ -1082,7 +1084,7 @@
   function readAmount(fd) {
     const base = S.ctx.assoc.currency, c = val(fd, 'pay_cur') || base, raw = Number(val(fd, 'amount').replace(',', '.'));
     if (!(raw > 0)) fail('Saisissez un montant supérieur à 0.');
-    if (c === base) return { amount: Math.round(raw), fx: {} };
+    if (c === base) { if (!Number.isInteger(raw)) fail('Écrivez le montant en chiffres, sans point ni virgule : 1500, pas 1.500.'); return { amount: raw, fx: {} }; }
     const rate = r6(Number(val(fd, 'rate').replace(',', '.')));
     if (!(rate > 0)) fail(`Indiquez le taux : combien vaut 1 ${CUR_LABEL[c] || c} en ${CUR_LABEL[base] || base} ?`);
     const orig = Math.round(raw * 100) / 100, amount = Math.round(orig * rate);
@@ -1375,7 +1377,7 @@
     const mine = S.ctx.me && ops.some(o => o.member_id === S.ctx.me.id && o.kind === 'in' && !o.reversal_of && !rset.has(o.id));
     return `${subHead('Collecte', B() + '/collectes')}
       <section class="card hero col-hero"><div class="eyebrow">${I.heart} ${esc(c.kind)}${open ? '' : ' · close'}</div><h2 style="color:inherit">${esc(c.title)}</h2>${c.beneficiary ? `<span style="opacity:.85">Pour ${esc(c.beneficiary)}</span>` : ''}
-        <div class="big num">${num(got)} <span class="cur">${esc(CUR_LABEL[S.ctx.assoc.currency] || '')}</span></div>
+        <div class="big num${fit(got)}">${num(got)} <span class="cur">${esc(CUR_LABEL[S.ctx.assoc.currency] || '')}</span></div>
         ${c.goal ? `<div class="bar"><i style="width:${pct(got, c.goal)}%"></i></div>` : ''}
         <div class="boxes num"><div><small>Contributions</small><b>${t.contributions}</b></div><div><small>Remis</small><b>${money(given)}</b></div></div></section>
       ${c.description ? `<p class="card" style="white-space:pre-line;margin:0">${esc(c.description)}</p>` : ''}
@@ -1434,7 +1436,7 @@
     const bal = S.ctx.bal;
     const bars = (kind, total) => cats.filter(c => c.kind === kind && Number(c.total) > 0).sort((x, y) => y.total - x.total).map(c => `<div class="catbar ${kind}"><span>${esc(c.category)}</span><div class="bar"><i style="width:${Math.max(2, pct(c.total, total))}%"></i></div><span class="num" style="font-weight:600">${num(c.total)}</span></div>`).join('') || '<span class="muted">Rien pour le moment.</span>';
     return `
-      <section class="card hero"><div class="eyebrow">Solde disponible</div><div class="big num">${money(bal.in - bal.out)}</div><div class="split num"><span>Recettes <b>${money(bal.in)}</b></span><span>Dépenses <b>${money(bal.out)}</b></span></div></section>
+      <section class="card hero"><div class="eyebrow">Solde disponible</div><div class="big num${fit(bal.in - bal.out)}">${money(bal.in - bal.out)}</div><div class="split num"><span>Recettes <b>${money(bal.in)}</b></span><span>Dépenses <b>${money(bal.out)}</b></span></div></section>
       <section class="card stack"><div class="between"><h2>Recettes</h2><span class="muted num">${money(bal.in)}</span></div>${bars('in', bal.in)}</section>
       <section class="card stack"><div class="between"><h2>Dépenses</h2><span class="muted num">${money(bal.out)}</span></div>${bars('out', bal.out)}</section>
       ${projects.length ? `<section class="card stack"><h2>Projets</h2>${projects.map(p => { const t = tot.get(p.id) || { collected: 0, spent: 0 }; return `<a class="item" href="${B()}/p/${p.id}" style="padding:8px 0"><div class="body"><div class="t">${esc(p.name)}</div><div class="s wrap num">Collecté ${money(t.collected)} · dépensé ${money(t.spent)}</div></div><span class="pill ${p.status === 'Terminé' ? 'p-blue' : 'p-ok'}">${esc(p.status)}</span></a>`; }).join('')}</section>` : ''}
@@ -1784,7 +1786,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       <article class="report stack">
         <header class="report-head"><span class="eyebrow">${esc(a.name)}</span><h1>${esc(title)}</h1><span class="muted" style="font-size:13px">Établi le ${dFR(todayISO())} avec VillageLink</span></header>
         <section class="card stack"><h2>Caisse de l’année</h2><dl class="kv num" style="margin:0"><dt>Solde au 1er janvier</dt><dd>${money(open)}</dd><dt>Entrées</dt><dd style="color:var(--green)">${inY ? '+' : ''}${money(inY)}</dd><dt>Sorties</dt><dd style="color:var(--danger)">${outY ? '−' : ''}${money(outY)}</dd><dt><b>Solde en fin de période</b></dt><dd><b>${money(close)}</b></dd></dl></section>
-        <section class="card stack"><h2>Mois par mois</h2><table class="sheet num"><thead><tr><th>Mois</th><th>Entrées</th><th>Sorties</th><th>Solde</th></tr></thead><tbody>${rows.map(([p, i, o, r]) => `<tr><td>${esc(pFR(p).replace(/ \d{4}$/, ''))}</td><td>${i ? '+' : ''}${num(i)}</td><td>${o ? '−' : ''}${num(o)}</td><td>${num(r)}</td></tr>`).join('')}</tbody></table><span class="muted" style="font-size:13px">Montants en ${esc(CUR_LABEL[a.currency] || a.currency)}.</span></section>
+        <section class="card stack"><h2>Mois par mois</h2><div class="sheet-wrap"><table class="sheet num"><thead><tr><th>Mois</th><th>Entrées</th><th>Sorties</th><th>Solde</th></tr></thead><tbody>${rows.map(([p, i, o, r]) => `<tr><td>${esc(pFR(p).replace(/ \d{4}$/, ''))}</td><td>${i ? '+' : ''}${num(i)}</td><td>${o ? '−' : ''}${num(o)}</td><td>${num(r)}</td></tr>`).join('')}</tbody></table></div><span class="muted" style="font-size:13px">Montants en ${esc(CUR_LABEL[a.currency] || a.currency)}.</span></section>
         <section class="card stack"><h2>Entrées par catégorie</h2>${catList(byCat('in'))}</section>
         <section class="card stack"><h2>Dépenses par catégorie</h2>${catList(byCat('out'))}</section>
         <section class="card stack"><h2>Vie de l’association</h2><dl class="kv num" style="margin:0"><dt>Membres actifs</dt><dd>${activeMembers().length}</dd><dt>Réunions tenues</dt><dd>${held}</dd></dl></section>
@@ -2020,7 +2022,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
         <span class="eyebrow">Cotisation</span>
         <div class="row2"><div class="field"><label for="as-fee">${(S.ctx.cats || []).length ? 'Cotisation générale par mois' : 'Montant par mois'}</label><input id="as-fee" name="fee_amount" type="number" inputmode="numeric" min="0" step="1" value="${esc(a.fee_amount)}" ${ro}></div><div class="field"><label for="as-due">Jour d’échéance</label><input id="as-due" name="fee_due_day" type="number" inputmode="numeric" min="1" max="28" value="${esc(a.fee_due_day)}" ${ro}></div></div>
         <div class="field"><label for="as-start">Suivre les cotisations à partir de</label><input id="as-start" name="dues_start" type="month" value="${esc(ym(a.dues_start))}" ${ro}><p class="help">Les mois précédents ne comptent pas comme des retards.</p></div>
-        <div class="field"><label for="as-cur">Monnaie</label><select id="as-cur" name="currency" ${ro}>${CURRENCIES.map(([k, l]) => opt(k, l, a.currency)).join('')}</select></div>
+        <div class="field"><label for="as-cur">Monnaie</label><select id="as-cur" name="currency" ${ro || (S.ctx.bal.in || S.ctx.bal.out ? 'disabled' : '')}>${CURRENCIES.map(([k, l]) => opt(k, l, a.currency)).join('')}</select>${S.ctx.bal.in || S.ctx.bal.out ? '<p class="help">La monnaie ne peut plus changer : l’association a déjà des montants enregistrés.</p>' : ''}</div>
         <span class="eyebrow">Dépenses</span>
         <div class="field"><label class="check" style="align-items:flex-start"><input type="checkbox" name="expense_approval" ${a.expense_approval ? 'checked' : ''} ${ro} style="margin-top:2px"> <span><b>Double validation des dépenses</b><br><span class="muted" style="font-size:13px;font-weight:400">Le trésorier propose, le président ou le vice-président approuve. Aucune sortie d’argent sans deux personnes.</span></span></label></div>
         <span class="eyebrow">Fiche de l’association</span>
@@ -2038,7 +2040,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
      Formulaires
   ------------------------------------------------------------------ */
   const val = (fd, k) => String(fd.get(k) ?? '').trim();
-  const intVal = (fd, k) => { const v = val(fd, k); return v === '' ? NaN : Math.round(Number(v)); };
+  const intVal = (fd, k) => { const v = val(fd, k); if (v === '') return NaN; const n = Number(v.replace(',', '.')); if (Number.isFinite(n) && !Number.isInteger(n)) fail('Écrivez le montant en chiffres, sans point ni virgule : 1500, pas 1.500.'); return Math.round(n); };
   const fail = m => { const e = new Error(m); e.user = true; throw e; };
 
   async function compress(file) {
@@ -2295,6 +2297,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       if (!window.crypto || !crypto.subtle) fail('Ce téléphone ne permet pas le verrou. Mettez à jour votre navigateur.');
       const salt = [...crypto.getRandomValues(new Uint8Array(12))].map(x => x.toString(16).padStart(2, '0')).join('');
       localStorage.setItem(PINK, JSON.stringify({ v: 1, salt, hash: await pinHash(a, salt) }));
+      tryClear();
       toast('Verrou activé'); route();
     },
     async cover(fd) {
@@ -2372,7 +2375,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       toast('Association bloquée'); renderAdmin();
     },
     async claim(fd) {
-      const me = S.ctx.me, period = val(fd, 'period'), amount = Math.round(Number(val(fd, 'amount')));
+      const me = S.ctx.me, period = val(fd, 'period'), amount = Number(val(fd, 'amount').replace(',', '.')); if (Number.isFinite(amount) && !Number.isInteger(amount)) fail('Écrivez le montant en chiffres, sans point ni virgule : 1500, pas 1.500.');
       if (!/^\d{4}-\d{2}$/.test(period)) fail('Choisissez le mois à payer.');
       if (!(amount > 0)) fail('Saisissez le montant envoyé.');
       const method = val(fd, 'method'); if (!method) fail('Choisissez Wave, Orange Money ou Free Money.');
@@ -2401,7 +2404,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       if (isNaN(fee) || fee < 0) fail('Montant de cotisation invalide.');
       if (isNaN(due) || due < 1 || due > 28) fail('Le jour d’échéance doit être entre 1 et 28.');
       if (!/^\d{4}-\d{2}$/.test(start)) fail('Choisissez le mois de début du suivi.');
-      const row = { fee_amount: fee, fee_due_day: due, dues_start: start + '-01', currency: val(fd, 'currency'), founded_on: val(fd, 'founded_on') || null, expense_approval: fd.get('expense_approval') === 'on' };
+      const row = { fee_amount: fee, fee_due_day: due, dues_start: start + '-01', ...(val(fd, 'currency') ? { currency: val(fd, 'currency') } : {}), founded_on: val(fd, 'founded_on') || null, expense_approval: fd.get('expense_approval') === 'on' };
       ['name', 'village', 'origin_country', 'region', 'prefecture', 'residence_city', 'residence_country', 'description'].forEach(k => { row[k] = val(fd, k); });
       must(await sb.from('associations').update(row).eq('id', S.ctx.assoc.id).select('id').single());
       await refresh(); toast('Association enregistrée'); route();
@@ -2565,7 +2568,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
         const r = must(await sb.storage.from('proofs').createSignedUrl(b.dataset.path, 3600));
         box.innerHTML = /\.pdf$/i.test(b.dataset.path) ? `<a class="btn ghost sm" target="_blank" rel="noopener" href="${esc(r.signedUrl)}">Ouvrir le PDF</a>` : `<a href="${esc(r.signedUrl)}" target="_blank" rel="noopener"><img class="proof-img" src="${esc(r.signedUrl)}" alt="Justificatif"></a>`;
       } else if (act === 'pinoff') {
-        try { localStorage.removeItem(PINK); } catch (e) { /* rien */ }
+        try { localStorage.removeItem(PINK); localStorage.removeItem('vl:pin:try'); } catch (e) { /* rien */ }
         toast('Verrou retiré'); route();
       } else if (act === 'exp') {
         b.disabled = true; try { await exportData(b.dataset.what); } finally { b.disabled = false; }
@@ -2585,7 +2588,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
 
   /* Mode hors ligne : un service worker garde une copie de l'application et des dernières données lues. */
   function clearOfflineData() {
-    try { localStorage.removeItem('vl:pin'); } catch (e) { /* rien */ }
+    try { localStorage.removeItem('vl:pin'); localStorage.removeItem('vl:pin:try'); } catch (e) { /* rien */ }
     try { if (navigator.serviceWorker && navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage('vl-clear'); } catch (e) { /* rien */ }
     try { if (window.caches) caches.delete('vl-data-v1'); } catch (e) { /* rien */ }
   }
@@ -2617,7 +2620,12 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
     const b = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: new TextEncoder().encode(salt), iterations: 100000 }, k, 256);
     return [...new Uint8Array(b)].map(x => x.toString(16).padStart(2, '0')).join('');
   };
-  let lockP = null, hiddenAt = 0, badTries = 0, waitUntil = 0;
+  let lockP = null, hiddenAt = 0;
+  // Essais ratés gardés sur le téléphone : recharger la page ne remet pas le compteur à zéro.
+  const TRYK = 'vl:pin:try';
+  const tryGet = () => { try { const t = JSON.parse(store.get(TRYK) || '{}'); return { n: t.n | 0, until: Number(t.until) || 0, rounds: t.rounds | 0 }; } catch (e) { return { n: 0, until: 0, rounds: 0 }; } };
+  const trySet = t => store.set(TRYK, JSON.stringify(t));
+  const tryClear = () => { try { localStorage.removeItem(TRYK); } catch (e) { /* rien */ } };
   function showLock() {
     if (lockP) return lockP;
     lockP = new Promise(ok => {
@@ -2630,17 +2638,18 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       f.addEventListener('submit', async ev => {
         ev.preventDefault();
         const st = pinGet(); if (!st) return done();
-        const left = Math.ceil((waitUntil - Date.now()) / 1000);
-        if (left > 0) { err.textContent = `Trop d’essais. Attendez ${left} secondes.`; err.hidden = false; return; }
+        const t = tryGet(), left = Math.ceil((t.until - Date.now()) / 1000);
+        if (left > 0) { err.textContent = left > 90 ? `Trop d’essais. Attendez ${Math.ceil(left / 60)} minutes.` : `Trop d’essais. Attendez ${left} secondes.`; err.hidden = false; return; }
         let good = false; try { good = (await pinHash(inp.value, st.salt)) === st.hash; } catch (x) { good = false; }
-        if (good) { badTries = 0; return done(); }
-        inp.value = ''; badTries++;
-        if (badTries >= 5) { badTries = 0; waitUntil = Date.now() + 30000; err.textContent = 'Trop d’essais. Attendez 30 secondes.'; }
+        if (good) { tryClear(); return done(); }
+        inp.value = ''; t.n++;
+        if (t.n >= 5) { t.rounds++; t.n = 0; const wait = Math.min(30 * 2 ** (t.rounds - 1), 3600); t.until = Date.now() + wait * 1000; err.textContent = wait > 90 ? `Trop d’essais. Attendez ${Math.ceil(wait / 60)} minutes.` : `Trop d’essais. Attendez ${wait} secondes.`; }
         else err.textContent = 'Code incorrect.';
+        trySet(t);
         err.hidden = false;
       });
       el.querySelector('[data-lock=out]').addEventListener('click', async () => {
-        try { localStorage.removeItem(PINK); } catch (x) { /* rien */ }
+        try { localStorage.removeItem(PINK); localStorage.removeItem('vl:pin:try'); } catch (x) { /* rien */ }
         done();
         try { await pushOff(true).catch(() => {}); clearOfflineData(); await sb.auth.signOut(); } catch (x) { console.error(x); }
         S.ctx = null; S.authMode = 'login'; S.authMsg = ''; S.session = null; S.user = null; location.hash = '#/'; renderAuth();
