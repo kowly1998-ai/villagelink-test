@@ -915,7 +915,7 @@
       const m = S.ctx.byId.get(ms.value); if (!m) return;
       const base = S.ctx.assoc.currency, c = $('#pay-cur') ? $('#pay-cur').value : base, r = Number(($('#pay-rate') || {}).value), v = Number(String(am.value).replace(',', '.')) || 0;
       const got = c === base ? v : (r > 0 ? Math.round(v * r) : 0), left = Math.max(dues(m).remaining - got, 0);
-      $('#pay-recap').innerHTML = `<dt>Mois couvert</dt><dd>${esc(pFR(ps.value))}</dd><dt>Reste dû après</dt><dd class="${left ? 'due' : ''}">${left ? money(left) : 'À jour'}</dd>${m.phone ? `<dt>Reçu à envoyer à</dt><dd>${esc(m.phone)}</dd>` : ''}`;
+      $('#pay-recap').innerHTML = `<dt>Mois couvert</dt><dd>${esc(pFR(ps.value))}</dd><dt>Reste dû après</dt>${c === base && !Number.isInteger(v) ? '<dd class="due">Montant à corriger</dd>' : `<dd class="${left ? 'due' : ''}">${left ? money(left) : 'À jour'}</dd>`}${m.phone ? `<dt>Reçu à envoyer à</dt><dd>${esc(m.phone)}</dd>` : ''}`;
     };
     // Montant proposé = reste dû, converti dans la monnaie reçue.
     const due = () => Math.max(feeSel() - paidFor(ms.value, ps.value), 0) || feeSel();
