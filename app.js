@@ -758,12 +758,14 @@
     const hist = must(await sb.from('transactions').select('*').eq('association_id', S.ctx.assoc.id).eq('member_id', m.id).order('occurred_on', { ascending: false }).order('id', { ascending: false }).limit(60));
     const rset = await reversedSet(hist);
     const start = [ym(S.ctx.assoc.dues_start), ym(m.joined_on)].sort().pop(), cur = curYM();
-    const periods = fee && start <= cur ? monthsBetween(start, cur).reverse().slice(0, 12) : [];
+    // Les mois payés d'avance s'affichent aussi (paiement réparti sur plusieurs mois).
+    const ahead = [...S.ctx.paidMap.keys()].filter(k => k.startsWith(m.id + '|')).map(k => k.split('|')[1]).filter(p => p > cur).sort().pop();
+    const periods = fee && start <= cur ? monthsBetween(start, ahead || cur).reverse().slice(0, 12 + (ahead ? monthsBetween(cur, ahead).length - 1 : 0)) : [];
     const relance = relanceText(m, d);
     return `${subHead('Fiche membre', B() + '/membres')}
       <div class="row"><div class="av lg">${esc(initials(m.full_name))}</div><div style="min-width:0"><h2 style="font-size:20px">${esc(m.full_name)}</h2><div class="row" style="flex-wrap:wrap;gap:6px;margin-top:4px"><span class="pill p-blue">${esc(ROLES[m.role])}</span>${statusPill(m)}</div></div></div>
       <section class="card"><dl class="kv num" style="margin:0"><dt>Téléphone</dt><dd>${esc(m.phone) || '<span class="muted">—</span>'}</dd><dt>Email</dt><dd>${esc(m.email) || '<span class="muted">—</span>'}</dd><dt>Résidence</dt><dd>${esc([m.city, m.country].filter(Boolean).join(', ')) || '<span class="muted">—</span>'}</dd>${m.section_id ? `<dt>Section</dt><dd>${esc(secName(m.section_id))}${(S.ctx.sections || []).some(x => x.treasurer_member_id === m.id) ? ' · trésorier de section' : ''}</dd>` : ''}${(S.ctx.cats || []).length ? `<dt>Catégorie</dt><dd>${catOf(m) ? esc(catOf(m).name) : 'Cotisation générale'}${hasFees() ? ' · ' + (fee ? money(fee) + ' par mois' : 'dispensé') : ''}</dd>` : ''}<dt>Adhésion</dt><dd>${dFR(m.joined_on)}</dd><dt>Application</dt><dd>${m.user_id ? 'Oui' : 'Non, suivi par le trésorier'}</dd></dl></section>
-      ${periods.length ? `<section class="card stack"><h2>Cotisations</h2>${periods.map(p => { const pd = paidFor(m.id, p), fee = feeOf(m, p); return `<div class="between num"><span>${pFR(p)}</span>${pd >= fee ? `<span class="pill p-ok">${money(pd)} payé</span>` : exemptOf(m, p) ? '<span class="pill p-blue">Dispensé</span>' : `<span class="pill ${d.late.includes(p) ? 'p-late' : 'p-blue'}">Reste ${money(fee - pd)}</span>`}</div>`; }).join('')}
+      ${periods.length ? `<section class="card stack"><h2>Cotisations</h2>${periods.map(p => { const pd = paidFor(m.id, p), fee = feeOf(m, p); return `<div class="between num"><span>${pFR(p)}</span>${pd >= fee ? `<span class="pill p-ok">${money(pd)} payé</span>` : exemptOf(m, p) ? '<span class="pill p-blue">Dispensé</span>' : p > cur ? `<span class="pill p-blue">${pd ? money(pd) + ' payé d’avance' : 'À venir'}</span>` : `<span class="pill ${d.late.includes(p) ? 'p-late' : 'p-blue'}">Reste ${money(fee - pd)}</span>`}</div>`; }).join('')}
         ${d.remaining ? `<div class="between num" style="border-top:1px solid var(--line);padding-top:10px"><b>Total dû</b><b style="color:var(--warn)">${money(d.remaining)}</b></div>` : ''}</section>` : ''}
       ${await exemptCard(m)}
       <div class="stack">
