@@ -195,37 +195,35 @@
      Contexte d'une association
   ------------------------------------------------------------------ */
   async function loadCtx(id) {
-    const [a, members, paid, bal] = await Promise.all([
+    // Tout est demandé en même temps : sur une connexion lente, l'attente est celle de la demande la plus longue, pas leur somme.
+    const soft = q => q.then(r => (r.error ? null : r.data), () => null);
+    const MCOLS = 'id,association_id,user_id,full_name,city,country,role,joined_on,active,created_at,pending,created_by_join,section_id,category_id';
+    const seenKey = 'vl:notif:' + id, seen = Number(store.get(seenKey) || 0);
+    const [a, members, paid, bal, contacts, msg, log, newLog, sectionsR, catsR, exemptsR, payNumsR, claimsR, expR] = await Promise.all([
       sb.from('associations').select('*').eq('id', id).maybeSingle().then(must),
-      fetchAll(() => sb.from('members').select('*').eq('association_id', id).order('full_name').order('id')),
+      fetchAll(() => sb.from('members').select(MCOLS).eq('association_id', id).order('full_name').order('id')),
       fetchAll(() => sb.from('v_member_paid').select('member_id,period,paid').eq('association_id', id).order('period').order('member_id')),
-      sb.from('v_balances').select('*').eq('association_id', id).maybeSingle().then(must)
+      sb.from('v_balances').select('*').eq('association_id', id).maybeSingle().then(must),
+      soft(sb.rpc('member_contacts', { p_assoc: id })),
+      soft(sb.from('messages').select('id').eq('association_id', id).order('id', { ascending: false }).limit(1)),
+      soft(sb.from('activity_log').select('id').eq('association_id', id).order('id', { ascending: false }).limit(1)),
+      store.get(seenKey) ? soft(sb.from('activity_log').select('id').eq('association_id', id).gt('id', seen).neq('actor_id', S.user.id).limit(99)) : Promise.resolve(null),
+      soft(sb.from('sections').select('*').eq('association_id', id).order('name')),
+      soft(sb.from('member_categories').select('*').eq('association_id', id).order('fee_amount', { ascending: false })),
+      soft(sb.from('member_exemptions').select('id,member_id,from_period,to_period,created_label,created_at,ended_label').eq('association_id', id).order('from_period')),
+      soft(sb.from('pay_numbers').select('*').eq('association_id', id).maybeSingle()),
+      soft(sb.from('payment_claims').select('*').eq('association_id', id).eq('status', 'pending').order('id', { ascending: true }).limit(99)),
+      soft(sb.from('expense_requests').select('id').eq('association_id', id).eq('status', 'En attente').limit(99))
     ]);
     if (!a) { S.ctx = null; return null; }
-    let lastMsg = 0;
-    try { const r = await sb.from('messages').select('id').eq('association_id', id).order('id', { ascending: false }).limit(1); if (!r.error && r.data[0]) lastMsg = r.data[0].id; } catch (e) { /* discussion pas encore installée */ }
-    let notif = 0, lastLog = 0;
-    try {
-      const r = await sb.from('activity_log').select('id').eq('association_id', id).order('id', { ascending: false }).limit(1);
-      if (!r.error && r.data[0]) lastLog = r.data[0].id;
-      const seenKey = 'vl:notif:' + id, seen = Number(store.get(seenKey) || 0);
-      if (!store.get(seenKey)) store.set(seenKey, String(lastLog));
-      else if (lastLog > seen) {
-        const n = await sb.from('activity_log').select('id').eq('association_id', id).gt('id', seen).neq('actor_id', S.user.id).limit(99);
-        if (!n.error) notif = n.data.length;
-      }
-    } catch (e) { /* pas bloquant */ }
-    let sections = [];
-    try { const r = await sb.from('sections').select('*').eq('association_id', id).order('name'); if (!r.error) sections = r.data || []; } catch (e) { /* sections pas encore installées */ }
-    let cats = [];
-    try { const r = await sb.from('member_categories').select('*').eq('association_id', id).order('fee_amount', { ascending: false }); if (!r.error) cats = r.data || []; } catch (e) { /* catégories pas encore installées */ }
-    let exempts = [];
-    try { const r = await sb.from('member_exemptions').select('id,member_id,from_period,to_period,created_label,created_at,ended_label').eq('association_id', id).order('from_period'); if (!r.error) exempts = r.data || []; } catch (e) { /* dispenses pas encore installées */ }
-    let payNums = null, claims = [];
-    try { const r = await sb.from('pay_numbers').select('*').eq('association_id', id).maybeSingle(); if (!r.error) payNums = r.data || null; } catch (e) { /* mobile money pas encore installé */ }
-    try { const r = await sb.from('payment_claims').select('*').eq('association_id', id).eq('status', 'pending').order('id', { ascending: true }).limit(99); if (!r.error) claims = r.data || []; } catch (e) { /* idem */ }
-    let expPending = 0;
-    try { const r = await sb.from('expense_requests').select('id').eq('association_id', id).eq('status', 'En attente').limit(99); if (!r.error) expPending = r.data.length; } catch (e) { /* double validation pas encore installée */ }
+    // Téléphone et e-mail : seulement ceux que la base autorise (bureau : tous ; membre : sa fiche et le bureau).
+    const cmap = new Map((contacts || []).map(c => [c.id, c]));
+    members.forEach(m => { const c = cmap.get(m.id); m.phone = c ? c.phone || '' : ''; m.email = c ? c.email || '' : ''; });
+    const lastMsg = msg && msg[0] ? msg[0].id : 0, lastLog = log && log[0] ? log[0].id : 0;
+    let notif = 0;
+    if (!store.get(seenKey)) store.set(seenKey, String(lastLog));
+    else if (lastLog > seen && newLog) notif = newLog.length;
+    const sections = sectionsR || [], cats = catsR || [], exempts = exemptsR || [], payNums = payNumsR || null, claims = claimsR || [], expPending = (expR || []).length;
     try { if (navigator.setAppBadge) { if (notif) navigator.setAppBadge(notif); else navigator.clearAppBadge(); } } catch (e) { /* non pris en charge */ }
     const paidMap = new Map();
     paid.forEach(r => paidMap.set(r.member_id + '|' + r.period, Number(r.paid)));
@@ -845,7 +843,7 @@
     if (f === 'claims') {
       list = `<p class="note" style="margin:0"><b>Avant de confirmer</b>, ouvrez VOTRE application Wave, Orange Money ou Free Money et vérifiez que l’argent est bien arrivé. Ne vous fiez jamais à un SMS ni à une capture d’écran. Wave permet d’annuler un envoi pendant une heure : pour un paiement Wave très récent, attendez une heure avant de confirmer.</p>
         <div class="list">${toConf.map(c => { const m = S.ctx.byId.get(c.member_id) || { full_name: '?' }; return `<div class="item" style="flex-wrap:wrap"><div class="av">${esc(initials(m.full_name))}</div><div class="body"><div class="t">${esc(m.full_name)}</div><div class="s wrap num"><b style="color:var(--ink)">${money(c.amount)}</b> par ${esc(c.method)} · ${esc(pFR(c.period))}<br>Envoyé au ${esc(c.sent_to)} · déclaré le ${dFR(localDay(c.created_at))} à ${hm(c.created_at)}${c.reference ? '<br>Réf. ' + esc(c.reference) : '<br>Sans référence'}</div>
-          <div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="btn primary sm" data-act="claim-ok" data-id="${c.id}">Confirmer la réception</button><button class="btn ghost sm" data-act="claim-no" data-id="${c.id}">Refuser</button></div>
+          ${c.created_by === S.user.id || m.user_id === S.user.id ? '<p class="help" style="margin:8px 0 0">C’est votre propre paiement : un autre membre du bureau doit le confirmer.</p>' : `<div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="btn primary sm" data-act="claim-ok" data-id="${c.id}">Confirmer la réception</button><button class="btn ghost sm" data-act="claim-no" data-id="${c.id}">Refuser</button></div>`}
           <form class="stack" data-form="rejectclaim" data-id="${c.id}" id="rjc-${c.id}" hidden style="margin-top:8px" novalidate><div class="field"><label for="rjc-r-${c.id}">Motif du refus</label><input id="rjc-r-${c.id}" name="reason" placeholder="Ex. rien reçu sur Wave"></div><p class="err" hidden></p><button class="btn danger sm" type="submit">Refuser ce paiement</button></form></div></div>`; }).join('') || '<div class="empty">Aucun paiement à confirmer.</div>'}</div>`;
     } else if (f === 'late') {
       const row = (m, ps) => { const d = dues(m); return `<div class="item"><div class="av">${esc(initials(m.full_name))}</div><div class="body"><a class="t" href="${B()}/m/${m.id}" style="display:block;text-decoration:none">${esc(m.full_name)}</a><div class="s wrap num">${ps(d).map(pFR).join(', ')} · reste ${money(d.remaining)}</div><div class="row" style="margin-top:8px;flex-wrap:wrap">${canCollectFor(m) ? `<a class="btn primary sm" href="${B()}/encaisser?m=${m.id}">Encaisser</a>` : ''}<a class="btn wa sm" target="_blank" rel="noopener" href="${waTo(m.phone, relanceText(m, d))}">${I.wa} Relancer</a></div></div></div>`; };
