@@ -199,7 +199,7 @@
     const soft = q => q.then(r => (r.error ? null : r.data), () => null);
     const MCOLS = 'id,association_id,user_id,full_name,city,country,role,joined_on,active,created_at,pending,created_by_join,section_id,category_id';
     const seenKey = 'vl:notif:' + id, seen = Number(store.get(seenKey) || 0);
-    const [a, members, paid, bal, contacts, msg, log, newLog, sectionsR, catsR, exemptsR, payNumsR, claimsR, expR] = await Promise.all([
+    const [a, members, paid, bal, contacts, msg, log, newLog, sectionsR, catsR, exemptsR, payNumsR, claimsR, expR, feeH, catH] = await Promise.all([
       sb.from('associations').select('*').eq('id', id).maybeSingle().then(must),
       fetchAll(() => sb.from('members').select(MCOLS).eq('association_id', id).order('full_name').order('id')),
       fetchAll(() => sb.from('v_member_paid').select('member_id,period,paid').eq('association_id', id).order('period').order('member_id')),
@@ -213,7 +213,9 @@
       soft(sb.from('member_exemptions').select('id,member_id,from_period,to_period,created_label,created_at,ended_label').eq('association_id', id).order('from_period')),
       soft(sb.from('pay_numbers').select('*').eq('association_id', id).maybeSingle()),
       soft(sb.from('payment_claims').select('*').eq('association_id', id).eq('status', 'pending').order('id', { ascending: true }).limit(99)),
-      soft(sb.from('expense_requests').select('id').eq('association_id', id).eq('status', 'En attente').limit(99))
+      soft(sb.from('expense_requests').select('id').eq('association_id', id).eq('status', 'En attente').limit(99)),
+      soft(sb.from('fee_history').select('category_id,from_period,fee_amount').eq('association_id', id).order('from_period').limit(2000)),
+      soft(sb.from('member_category_history').select('member_id,category_id,from_period').eq('association_id', id).order('from_period').limit(5000))
     ]);
     if (!a) { S.ctx = null; return null; }
     // Téléphone et e-mail : seulement ceux que la base autorise (bureau : tous ; membre : sa fiche et le bureau).
@@ -223,12 +225,14 @@
     let notif = 0;
     if (!store.get(seenKey)) store.set(seenKey, String(lastLog));
     else if (lastLog > seen && newLog) notif = newLog.length;
+    const group = (rows, key) => { const g = new Map(); (rows || []).forEach(r => { const k = key(r); if (!g.has(k)) g.set(k, []); g.get(k).push(r); }); return g; };
+    const feeHist = group(feeH, r => r.category_id || ''), catHist = group(catH, r => r.member_id);
     const sections = sectionsR || [], cats = catsR || [], exempts = exemptsR || [], payNums = payNumsR || null, claims = claimsR || [], expPending = (expR || []).length;
     try { if (navigator.setAppBadge) { if (notif) navigator.setAppBadge(notif); else navigator.clearAppBadge(); } } catch (e) { /* non pris en charge */ }
     const paidMap = new Map();
     paid.forEach(r => paidMap.set(r.member_id + '|' + r.period, Number(r.paid)));
     const me = members.find(m => m.user_id === S.user.id) || null;
-    S.ctx = { loadedAt: Date.now(), lastMsg, notif, expPending, payNums, claims, exempts, sections, cats, lastLog, assoc: a, me, members, byId: new Map(members.map(m => [m.id, m])), paidMap,
+    S.ctx = { loadedAt: Date.now(), feeHist, catHist, lastMsg, notif, expPending, payNums, claims, exempts, sections, cats, lastLog, assoc: a, me, members, byId: new Map(members.map(m => [m.id, m])), paidMap,
       bal: { in: Number(bal ? bal.total_in : 0), out: Number(bal ? bal.total_out : 0) } };
     store.set('vl:last', id);
     return S.ctx;
@@ -254,16 +258,27 @@
   const paidFor = (mid, p) => S.ctx.paidMap.get(mid + '|' + p) || 0;
   // Cotisation mensuelle d'un membre : celle de sa catégorie, sinon la cotisation générale.
   const catOf = m => (m && m.category_id ? (S.ctx.cats || []).find(c => c.id === m.category_id) : null) || null;
-  const feeOf = m => { const c = catOf(m); return Number(c ? c.fee_amount : S.ctx.assoc.fee_amount) || 0; };
+  // Historique (v2.2.3) : un mois passé garde la catégorie et le montant valables à ce moment-là.
+  const lastFrom = (rows, p) => { let r = null; for (const x of rows || []) if (x.from_period <= p && (!r || x.from_period > r.from_period)) r = x; return r; };
+  const feeOf = (m, p) => {
+    if (!m) return 0;
+    const h = p ? lastFrom(S.ctx.catHist && S.ctx.catHist.get(m.id), p) : null;
+    const cid = h ? h.category_id : m.category_id;
+    const c = cid ? (S.ctx.cats || []).find(x => x.id === cid) || null : null;
+    const now = Number(c ? c.fee_amount : S.ctx.assoc.fee_amount) || 0;
+    if (!p) return now;
+    const f = lastFrom(S.ctx.feeHist && S.ctx.feeHist.get(c ? c.id : ''), p);
+    return f ? Number(f.fee_amount) || 0 : now;
+  };
   const hasFees = () => Number(S.ctx.assoc.fee_amount) > 0 || (S.ctx.cats || []).some(c => Number(c.fee_amount) > 0);
   const exemptOf = (m, p) => (S.ctx.exempts || []).find(e => e.member_id === m.id && e.from_period <= p && (!e.to_period || e.to_period >= p)) || null;
-  const dueIn = (m, p) => feeOf(m) > 0 && [ym(S.ctx.assoc.dues_start), ym(m.joined_on)].sort().pop() <= p && !exemptOf(m, p);
+  const dueIn = (m, p) => feeOf(m, p) > 0 && [ym(S.ctx.assoc.dues_start), ym(m.joined_on)].sort().pop() <= p && !exemptOf(m, p);
   function dues(m) {
-    const a = S.ctx.assoc, fee = feeOf(m), cur = curYM();
-    if (!fee || !m.active || m.pending) return { owed: [], late: [], remaining: 0, isLate: false };
+    const a = S.ctx.assoc, cur = curYM();
+    if (!m.active || m.pending) return { owed: [], late: [], remaining: 0, isLate: false };
     const start = [ym(a.dues_start), ym(m.joined_on)].sort().pop();
-    const periods = start <= cur ? monthsBetween(start, cur).filter(p => !exemptOf(m, p)) : [];
-    const owed = periods.filter(p => paidFor(m.id, p) < fee);
+    const periods = start <= cur ? monthsBetween(start, cur).filter(p => !exemptOf(m, p) && feeOf(m, p) > 0) : [];
+    const owed = periods.filter(p => paidFor(m.id, p) < feeOf(m, p));
     // Un mois est en retard quand son échéance est passée. Pour les mois suivis depuis la
     // création de l'association dans l'app, l'échéance doit aussi tomber après l'adhésion
     // et après cette création (sinon tout le monde serait en retard dès le premier jour).
@@ -276,7 +291,18 @@
       return due >= since;
     };
     const late = owed.filter(isLate);
-    return { owed, late, remaining: owed.reduce((s, p) => s + fee - paidFor(m.id, p), 0), isLate: late.length > 0 };
+    return { owed, late, remaining: owed.reduce((s, p) => s + feeOf(m, p) - paidFor(m.id, p), 0), isLate: late.length > 0 };
+  }
+  // Un paiement plus grand que le reste du mois est réparti sur les mois suivants (v2.2.3).
+  function spread(m, period, amount) {
+    const rows = []; let rem = amount, p = period;
+    for (let k = 0; rem > 0 && k < 24; k++, p = addMonth(p, 1)) {
+      if (exemptOf(m, p)) continue;
+      const left = feeOf(m, p) - paidFor(m.id, p);
+      if (left <= 0) continue;
+      const take = Math.min(rem, left); rows.push({ period: p, amount: take }); rem -= take;
+    }
+    return rem > 0 ? null : rows;
   }
   const activeMembers = () => S.ctx.members.filter(m => m.active && !m.pending);
   const pendingMembers = () => S.ctx.members.filter(m => m.pending);
@@ -580,7 +606,7 @@
     if (n) out += `<a class="card between pay-cta" href="${B()}/cotisations?f=claims"><span><span class="eyebrow">À vérifier dans votre Wave ou Orange Money</span><br><b>${n} paiement${n > 1 ? 's' : ''} à confirmer</b></span><span class="pill p-late num">${n}</span></a>`;
     const me = S.ctx.me;
     if (me && hasFees() && feeOf(me) > 0 && mmAvail().length) {
-      const d = dues(me), cur = curYM(), due = d.remaining || (dueIn(me, cur) ? Math.max(feeOf(me) - paidFor(me.id, cur), 0) : 0);
+      const d = dues(me), cur = curYM(), due = d.remaining || (dueIn(me, cur) ? Math.max(feeOf(me, cur) - paidFor(me.id, cur), 0) : 0);
       const pend = (S.ctx.claims || []).some(c => c.member_id === me.id);
       if (due > 0 || pend) out += `<a class="card between pay-cta gold" href="${B()}/payer"><span><span class="eyebrow">${pend ? 'Paiement en attente de confirmation' : d.isLate ? d.late.length + ' mois en retard' : 'Cotisation de ' + esc(pFR(cur))}</span><br><b class="num">${pend && !due ? 'Voir mon paiement' : 'Payer ' + money(due)}</b><br><span class="muted" style="font-size:14px">${mmAvail().map(([l]) => l).join(' · ')}</span></span><span class="q-ico">${I.wallet}</span></a>`;
     }
@@ -619,8 +645,8 @@
     }
     const act = activeMembers(), late = lateMembers().length;
     const dueNow = act.filter(m => dueIn(m, cur));
-    const collected = dueNow.reduce((s, m) => s + Math.min(paidFor(m.id, cur), feeOf(m)), 0), expected = dueNow.reduce((s, m) => s + feeOf(m), 0);
-    const paidCount = dueNow.filter(m => paidFor(m.id, cur) >= feeOf(m)).length;
+    const collected = dueNow.reduce((s, m) => s + Math.min(paidFor(m.id, cur), feeOf(m, cur)), 0), expected = dueNow.reduce((s, m) => s + feeOf(m, cur), 0);
+    const paidCount = dueNow.filter(m => paidFor(m.id, cur) >= feeOf(m, cur)).length;
     const bal = S.ctx.bal, solde = bal.in - bal.out, CURL = esc(CUR_LABEL[a.currency] || 'FCFA');
     const inMonth = recentTx.filter(t => t.kind === 'in' && ym(t.occurred_on) === cur).reduce((x, t) => x + Number(t.amount), 0);
     const outMonth = recentTx.filter(t => t.kind === 'out' && ym(t.occurred_on) === cur).reduce((x, t) => x + Number(t.amount), 0);
@@ -737,7 +763,7 @@
     return `${subHead('Fiche membre', B() + '/membres')}
       <div class="row"><div class="av lg">${esc(initials(m.full_name))}</div><div style="min-width:0"><h2 style="font-size:20px">${esc(m.full_name)}</h2><div class="row" style="flex-wrap:wrap;gap:6px;margin-top:4px"><span class="pill p-blue">${esc(ROLES[m.role])}</span>${statusPill(m)}</div></div></div>
       <section class="card"><dl class="kv num" style="margin:0"><dt>Téléphone</dt><dd>${esc(m.phone) || '<span class="muted">—</span>'}</dd><dt>Email</dt><dd>${esc(m.email) || '<span class="muted">—</span>'}</dd><dt>Résidence</dt><dd>${esc([m.city, m.country].filter(Boolean).join(', ')) || '<span class="muted">—</span>'}</dd>${m.section_id ? `<dt>Section</dt><dd>${esc(secName(m.section_id))}${(S.ctx.sections || []).some(x => x.treasurer_member_id === m.id) ? ' · trésorier de section' : ''}</dd>` : ''}${(S.ctx.cats || []).length ? `<dt>Catégorie</dt><dd>${catOf(m) ? esc(catOf(m).name) : 'Cotisation générale'}${hasFees() ? ' · ' + (fee ? money(fee) + ' par mois' : 'dispensé') : ''}</dd>` : ''}<dt>Adhésion</dt><dd>${dFR(m.joined_on)}</dd><dt>Application</dt><dd>${m.user_id ? 'Oui' : 'Non, suivi par le trésorier'}</dd></dl></section>
-      ${periods.length ? `<section class="card stack"><h2>Cotisations</h2>${periods.map(p => { const pd = paidFor(m.id, p); return `<div class="between num"><span>${pFR(p)}</span>${pd >= fee ? `<span class="pill p-ok">${money(pd)} payé</span>` : exemptOf(m, p) ? '<span class="pill p-blue">Dispensé</span>' : `<span class="pill ${d.late.includes(p) ? 'p-late' : 'p-blue'}">Reste ${money(fee - pd)}</span>`}</div>`; }).join('')}
+      ${periods.length ? `<section class="card stack"><h2>Cotisations</h2>${periods.map(p => { const pd = paidFor(m.id, p), fee = feeOf(m, p); return `<div class="between num"><span>${pFR(p)}</span>${pd >= fee ? `<span class="pill p-ok">${money(pd)} payé</span>` : exemptOf(m, p) ? '<span class="pill p-blue">Dispensé</span>' : `<span class="pill ${d.late.includes(p) ? 'p-late' : 'p-blue'}">Reste ${money(fee - pd)}</span>`}</div>`; }).join('')}
         ${d.remaining ? `<div class="between num" style="border-top:1px solid var(--line);padding-top:10px"><b>Total dû</b><b style="color:var(--warn)">${money(d.remaining)}</b></div>` : ''}</section>` : ''}
       ${await exemptCard(m)}
       <div class="stack">
@@ -837,8 +863,8 @@
     const f = q.get('f') || (toConf.length ? 'claims' : 'late');
     const late = lateMembers().sort((x, y) => dues(y).remaining - dues(x).remaining || x.full_name.localeCompare(y.full_name, 'fr'));
     const dueNow = activeMembers().filter(m => dueIn(m, cur));
-    const collected = dueNow.reduce((s, m) => s + Math.min(paidFor(m.id, cur), feeOf(m)), 0), expected = dueNow.reduce((s, m) => s + feeOf(m), 0);
-    const paidCount = dueNow.filter(m => paidFor(m.id, cur) >= feeOf(m)).length;
+    const collected = dueNow.reduce((s, m) => s + Math.min(paidFor(m.id, cur), feeOf(m, cur)), 0), expected = dueNow.reduce((s, m) => s + feeOf(m, cur), 0);
+    const paidCount = dueNow.filter(m => paidFor(m.id, cur) >= feeOf(m, cur)).length;
     let list = '';
     if (f === 'claims') {
       list = `<p class="note" style="margin:0"><b>Avant de confirmer</b>, ouvrez VOTRE application Wave, Orange Money ou Free Money et vérifiez que l’argent est bien arrivé. Ne vous fiez jamais à un SMS ni à une capture d’écran. Wave permet d’annuler un envoi pendant une heure : pour un paiement Wave très récent, attendez une heure avant de confirmer.</p>
@@ -857,7 +883,7 @@
       list = `<div class="list">${recent.map(t => txItem(t, rset)).join('') || '<div class="empty">Aucun paiement enregistré.</div>'}</div>`;
     }
     const secs = S.ctx.sections || [];
-    const secRows = secs.map(x => { const ms = dueNow.filter(m => m.section_id === x.id); return { x, n: ms.length, paid: ms.filter(m => paidFor(m.id, cur) >= feeOf(m)).length, got: ms.reduce((t, m) => t + Math.min(paidFor(m.id, cur), feeOf(m)), 0), late: ms.filter(m => dues(m).isLate).length }; });
+    const secRows = secs.map(x => { const ms = dueNow.filter(m => m.section_id === x.id); return { x, n: ms.length, paid: ms.filter(m => paidFor(m.id, cur) >= feeOf(m, cur)).length, got: ms.reduce((t, m) => t + Math.min(paidFor(m.id, cur), feeOf(m, cur)), 0), late: ms.filter(m => dues(m).isLate).length }; });
     const noSec = dueNow.filter(m => !m.section_id);
     const secCard = secs.length ? `<section class="card stack"><div class="between"><h2>Par section</h2><a class="link" href="${B()}/sections">Gérer</a></div>${secRows.map(r => `<a class="between num" href="${B()}/membres?f=s:${r.x.id}" style="text-decoration:none;color:inherit;gap:10px"><span style="min-width:0"><b>${esc(r.x.name)}</b><br><span class="muted" style="font-size:14px">${r.paid}/${r.n} à jour${r.late ? ' · ' + r.late + ' en retard' : ''}</span></span><b>${money(r.got)}</b></a>`).join('')}${noSec.length ? `<span class="muted" style="font-size:14px">${noSec.length} membre${noSec.length > 1 ? 's' : ''} sans section</span>` : ''}</section>` : '';
     return `<div class="between"><h1>Cotisations</h1></div>
@@ -897,14 +923,14 @@
   AFTER.encaisser = () => {
     const ms = $('#pay-m'), ps = $('#pay-p'), am = $('#pay-a');
     if (!ms) return;
-    const feeSel = () => feeOf(S.ctx.byId.get(ms.value));
+    const feeSel = () => feeOf(S.ctx.byId.get(ms.value), ps.value);
     const fill = () => {
       const m = S.ctx.byId.get(ms.value); if (!m) return;
       const d = dues(m), cur = curYM(), fee = feeOf(m);
       const opts = [...new Set([...d.owed, cur, addMonth(cur, 1), addMonth(cur, 2)])].sort();
-      ps.innerHTML = opts.map(p => opt(p, `${pFR(p)} · ${paidFor(m.id, p) >= fee ? 'déjà payé' : 'reste ' + money(fee - paidFor(m.id, p))}`)).join('');
-      const first = opts.find(p => paidFor(m.id, p) < fee) || cur; ps.value = first;
-      am.value = Math.max(fee - paidFor(m.id, first), 0) || fee;
+      ps.innerHTML = opts.map(p => opt(p, `${pFR(p)} · ${paidFor(m.id, p) >= feeOf(m, p) ? 'déjà payé' : 'reste ' + money(feeOf(m, p) - paidFor(m.id, p))}`)).join('');
+      const first = opts.find(p => paidFor(m.id, p) < feeOf(m, p)) || cur; ps.value = first;
+      const ff = feeOf(m, first); am.value = Math.max(ff - paidFor(m.id, first), 0) || ff;
       $('#pay-av').textContent = initials(m.full_name);
       const c = catOf(m); $('#pay-cat').textContent = [c ? c.name : '', d.isLate ? d.late.length + ' mois de retard' : 'à jour'].filter(Boolean).join(' · ');
       $('#pay-rule').textContent = 'Cotisation' + (c ? ' ' + c.name.toLowerCase() : '') + ' : ' + money(fee) + ' / mois';
@@ -913,7 +939,8 @@
       const m = S.ctx.byId.get(ms.value); if (!m) return;
       const base = S.ctx.assoc.currency, c = $('#pay-cur') ? $('#pay-cur').value : base, r = Number(($('#pay-rate') || {}).value), v = Number(String(am.value).replace(',', '.')) || 0;
       const got = c === base ? v : (r > 0 ? Math.round(v * r) : 0), left = Math.max(dues(m).remaining - got, 0);
-      $('#pay-recap').innerHTML = `<dt>Mois couvert</dt><dd>${esc(pFR(ps.value))}</dd><dt>Reste dû après</dt>${c === base && !Number.isInteger(v) ? '<dd class="due">Montant à corriger</dd>' : `<dd class="${left ? 'due' : ''}">${left ? money(left) : 'À jour'}</dd>`}${m.phone ? `<dt>Reçu à envoyer à</dt><dd>${esc(m.phone)}</dd>` : ''}`;
+      const sp = c === base && Number.isInteger(v) && v > 0 ? spread(m, ps.value, v) : null;
+      $('#pay-recap').innerHTML = `<dt>${sp && sp.length > 1 ? 'Mois couverts' : 'Mois couvert'}</dt><dd>${sp && sp.length > 1 ? esc(sp.map(x => pFR(x.period)).join(', ')) : esc(pFR(ps.value))}</dd><dt>Reste dû après</dt>${c === base && !Number.isInteger(v) ? '<dd class="due">Montant à corriger</dd>' : `<dd class="${left ? 'due' : ''}">${left ? money(left) : 'À jour'}</dd>`}${m.phone ? `<dt>Reçu à envoyer à</dt><dd>${esc(m.phone)}</dd>` : ''}`;
     };
     // Montant proposé = reste dû, converti dans la monnaie reçue.
     const due = () => Math.max(feeSel() - paidFor(ms.value, ps.value), 0) || feeSel();
@@ -976,13 +1003,13 @@
     const mine = must(await sb.from('payment_claims').select('*').eq('member_id', me.id).order('id', { ascending: false }).limit(12));
     const pendP = new Set(mine.filter(c => c.status === 'pending').map(c => c.period));
     const d = dues(me), cur = curYM();
-    const opts = [...new Set([...d.owed, cur, addMonth(cur, 1), addMonth(cur, 2)])].sort().filter(p => paidFor(me.id, p) < fee && !pendP.has(p) && !exemptOf(me, p));
+    const opts = [...new Set([...d.owed, cur, addMonth(cur, 1), addMonth(cur, 2)])].sort().filter(p => paidFor(me.id, p) < feeOf(me, p) && !pendP.has(p) && !exemptOf(me, p));
     const ST = { pending: ['p-late', 'En attente du trésorier'], confirmed: ['p-ok', 'Confirmé'], rejected: ['p-red', 'Refusé'], cancelled: ['p-blue', 'Annulé'] };
     const hist = mine.length ? `<section class="stack"><h2>Mes paiements déclarés</h2><div class="list">${mine.map(c => `<div class="item" style="align-items:flex-start"><div class="body"><div class="t num" style="white-space:normal">${money(c.amount)} · ${esc(c.method)}</div><div class="s wrap">${esc(pFR(c.period))} · ${dFR(localDay(c.created_at))} à ${hm(c.created_at)}${c.reference ? ' · réf. ' + esc(c.reference) : ''}${c.status === 'rejected' && c.reason ? '<br>Motif : ' + esc(c.reason) : ''}</div>${c.status === 'pending' ? `<button class="btn ghost sm" style="margin-top:8px" data-act="claim-cancel" data-id="${c.id}">Annuler cette déclaration</button>` : ''}${c.status === 'confirmed' && c.transaction_id ? `<a class="link" style="display:inline-block;margin-top:6px" href="${B()}/op/${c.transaction_id}?recu=1">Voir le reçu</a>` : ''}</div><span class="pill ${ST[c.status][0]}">${ST[c.status][1]}</span></div>`).join('')}</div></section>` : '';
     if (!opts.length) return `${head}<p class="note">${pendP.size ? 'Votre paiement est en attente : le trésorier doit vérifier qu’il a bien reçu l’argent.' : 'Vous êtes à jour. Merci !'}</p>${hist}`;
     return `${head}
       <form class="stack" data-form="claim" novalidate>
-        <div class="field"><label for="cl-p">Mois à payer</label><select id="cl-p" name="period">${opts.map(p => opt(p, `${pFR(p)} · ${money(fee - paidFor(me.id, p))}`)).join('')}</select></div>
+        <div class="field"><label for="cl-p">Mois à payer</label><select id="cl-p" name="period">${opts.map(p => opt(p, `${pFR(p)} · ${money(feeOf(me, p) - paidFor(me.id, p))}`)).join('')}</select></div>
         <div class="big-amount"><label for="cl-a" class="muted" style="font-size:14px">Montant à envoyer (${esc(CUR_LABEL[S.ctx.assoc.currency] || 'FCFA')})</label><input id="cl-a" name="amount" type="number" inputmode="numeric" min="1" step="1"></div>
         <div class="field"><span style="font-size:14px;font-weight:500;color:var(--muted)" id="cl-m-l">Payer avec</span><div class="radios" role="radiogroup" aria-labelledby="cl-m-l">${avail.map(([l], k) => `<label><input type="radio" name="method" value="${esc(l)}" ${k === 0 ? 'checked' : ''}>${esc(l)}</label>`).join('')}</div></div>
         <section class="card stack" id="cl-dest"></section>
@@ -1000,7 +1027,7 @@
     const ps = $('#cl-p'), am = $('#cl-a'), box = $('#cl-dest');
     if (!ps) return;
     const me = S.ctx.me, fee = feeOf(me), pn = S.ctx.payNums;
-    const fill = () => { am.value = Math.max(fee - paidFor(me.id, ps.value), 0) || fee; dest(); };
+    const fill = () => { const f = feeOf(me, ps.value); am.value = Math.max(f - paidFor(me.id, ps.value), 0) || f; dest(); };
     const dest = () => {
       const m = (document.querySelector('input[name=method]:checked') || {}).value || '';
       const k = (MM.find(([l]) => l === m) || [])[1], num = k ? pn[k] : '';
@@ -1022,7 +1049,7 @@
       if (r.method) { const rb = document.querySelector(`input[name=method][value="${r.method}"]`); if (rb && !rb.checked) rb.checked = true; }
       const meth = (document.querySelector('input[name=method]:checked') || {}).value || '';
       const k = (MM.find(([l]) => l === meth) || [])[1], num = k ? pn[k] : '';
-      const expected = Math.max(fee - paidFor(me.id, ps.value), 0) || fee, items = [];
+      const ef = feeOf(me, ps.value), expected = Math.max(ef - paidFor(me.id, ps.value), 0) || ef, items = [];
       if (r.amount) {
         am.value = r.amount;
         if (r.sent && r.sent !== r.amount) items.push(['warn', `Vous avez envoyé ${money(r.sent)}, l’association a reçu ${money(r.amount)}${r.fee ? ` (frais ${money(r.fee)} déduits)` : ''}. C’est ${money(r.amount)} qui sera compté.`]);
@@ -1169,7 +1196,7 @@
     const receipt = receiptText(t, m, author);
     return `${subHead(isReceipt ? 'Paiement enregistré' : 'Opération ' + txRef(t.id), m ? B() + '/m/' + m.id : B() + '/finances')}
       ${isReceipt ? `<div class="receipt stack num"><div class="between"><b>Reçu ${txRef(t.id)}</b><span class="pill p-ok">Payé</span></div><dl class="kv" style="margin:0"><dt>Membre</dt><dd>${esc(m.full_name)}</dd><dt>Objet</dt><dd>${esc(t.description)}</dd><dt>Montant</dt><dd>${money(t.amount)}${t.orig_currency ? ` (${origTag(t)})` : ''}</dd><dt>Mode</dt><dd>${esc(t.payment_method || '—')}</dd><dt>Date</dt><dd>${whenTx(t)}</dd></dl>
-        ${t.period && paidFor(m.id, t.period) < feeOf(m) ? `<span class="pill p-late">Reste ${money(feeOf(m) - paidFor(m.id, t.period))} pour ${pFR(t.period)}</span>` : ''}</div>
+        ${t.period && paidFor(m.id, t.period) < feeOf(m, t.period) ? `<span class="pill p-late">Reste ${money(feeOf(m, t.period) - paidFor(m.id, t.period))} pour ${pFR(t.period)}</span>` : ''}</div>
         <a class="btn wa block" target="_blank" rel="noopener" href="${waTo(m.phone, receipt)}">${I.wa} Envoyer le reçu sur WhatsApp</a>
         <a class="btn ghost block" href="${B()}/recu/${t.id}">Reçu en PDF</a>
         <a class="btn ghost block" href="${B()}/encaisser">Enregistrer un autre paiement</a>` : `
@@ -1315,7 +1342,7 @@
     return `
       ${mg ? (fullPlan() ? `<a class="btn primary block" href="${B()}/sections/nouvelle">${I.plus} Nouvelle section</a>` : upsell('Les sections : Dakar, Conakry, France… chacune avec son trésorier')) : ''}
       <p class="note">Une section regroupe les membres d’une même ville ou d’un même pays. Son trésorier encaisse les cotisations de sa section ; le bureau central voit toutes les sections.</p>
-      ${secs.map(x => { const ms = act.filter(m => m.section_id === x.id), tr = x.treasurer_member_id ? S.ctx.byId.get(x.treasurer_member_id) : null, paid = fee ? ms.filter(m => feeOf(m) > 0 && paidFor(m.id, cur) >= feeOf(m)).length : 0;
+      ${secs.map(x => { const ms = act.filter(m => m.section_id === x.id), tr = x.treasurer_member_id ? S.ctx.byId.get(x.treasurer_member_id) : null, paid = fee ? ms.filter(m => feeOf(m, cur) > 0 && paidFor(m.id, cur) >= feeOf(m, cur)).length : 0;
         return `<section class="card stack"><div class="between"><h2>${esc(x.name)}</h2>${mg ? `<a class="link" href="${B()}/sections/${x.id}/modifier">Modifier</a>` : ''}</div>
           <span class="muted" style="font-size:14px">${esc([x.city, x.country].filter(Boolean).join(', ') || '—')}</span>
           <dl class="kv num" style="margin:0"><dt>Membres</dt><dd>${ms.length}</dd>${fee ? `<dt>À jour ce mois</dt><dd>${paid}/${ms.length}</dd><dt>En retard</dt><dd>${ms.filter(m => dues(m).isLate).length}</dd>` : ''}<dt>Trésorier</dt><dd>${tr ? esc(tr.full_name) : '<span class="muted">Aucun</span>'}</dd></dl>
@@ -1806,9 +1833,9 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
     const deM = x => { const l = pFR(x); return /^[aeiouâéèh]/i.test(l) ? 'd’' + l : 'de ' + l; };
     const fee = hasFees() ? 1 : 0;
     const dueNow = activeMembers().filter(m => dueIn(m, M));
-    const paidN = dueNow.filter(m => paidFor(m.id, M) >= feeOf(m)).length;
-    const collected = dueNow.reduce((x, m) => x + Math.min(paidFor(m.id, M), feeOf(m)), 0), expected = dueNow.reduce((x, m) => x + feeOf(m), 0);
-    const unpaid = fee ? dueNow.filter(m => paidFor(m.id, M) < feeOf(m)) : [];
+    const paidN = dueNow.filter(m => paidFor(m.id, M) >= feeOf(m, M)).length;
+    const collected = dueNow.reduce((x, m) => x + Math.min(paidFor(m.id, M), feeOf(m, M)), 0), expected = dueNow.reduce((x, m) => x + feeOf(m, M), 0);
+    const unpaid = fee ? dueNow.filter(m => paidFor(m.id, M) < feeOf(m, M)) : [];
     const [meets, polls, projects, ptot] = await Promise.all([
       sb.from('meetings').select('*').eq('association_id', a.id).gte('starts_at', new Date(start + 'T00:00:00').toISOString()).lt('starts_at', new Date(next + 'T00:00:00').toISOString()).order('starts_at').then(r => r.error ? [] : r.data, () => []),
       sb.from('polls').select('*').eq('association_id', a.id).eq('status', 'Clos').gte('closed_at', new Date(start + 'T00:00:00').toISOString()).lt('closed_at', new Date(next + 'T00:00:00').toISOString()).then(r => r.error ? [] : r.data, () => []),
@@ -2019,6 +2046,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
         ${pres ? '' : '<p class="note">Seul le président peut modifier ces informations.</p>'}
         <span class="eyebrow">Cotisation</span>
         <div class="row2"><div class="field"><label for="as-fee">${(S.ctx.cats || []).length ? 'Cotisation générale par mois' : 'Montant par mois'}</label><input id="as-fee" name="fee_amount" type="number" inputmode="numeric" min="0" step="1" value="${esc(a.fee_amount)}" ${ro}></div><div class="field"><label for="as-due">Jour d’échéance</label><input id="as-due" name="fee_due_day" type="number" inputmode="numeric" min="1" max="28" value="${esc(a.fee_due_day)}" ${ro}></div></div>
+        <p class="help" style="margin-top:-6px">Un nouveau montant compte à partir du mois en cours. Les mois passés gardent l’ancien montant.</p>
         <div class="field"><label for="as-start">Suivre les cotisations à partir de</label><input id="as-start" name="dues_start" type="month" value="${esc(ym(a.dues_start))}" ${ro}><p class="help">Les mois précédents ne comptent pas comme des retards.</p></div>
         <div class="field"><label for="as-cur">Monnaie</label><select id="as-cur" name="currency" ${ro || (S.ctx.bal.in || S.ctx.bal.out ? 'disabled' : '')}>${CURRENCIES.map(([k, l]) => opt(k, l, a.currency)).join('')}</select>${S.ctx.bal.in || S.ctx.bal.out ? '<p class="help">La monnaie ne peut plus changer : l’association a déjà des montants enregistrés.</p>' : ''}</div>
         <span class="eyebrow">Dépenses</span>
@@ -2143,15 +2171,21 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
     async pay(fd) {
       const mid = val(fd, 'member_id'), period = val(fd, 'period');
       const m = S.ctx.byId.get(mid); if (!m) fail('Choisissez un membre.');
-      const fee = feeOf(m); if (!fee) fail('Ce membre est dispensé de cotisation.');
       if (!/^\d{4}-\d{2}$/.test(period)) fail('Choisissez le mois concerné.');
+      const fee = feeOf(m, period); if (!fee) fail('Ce membre est dispensé de cotisation.');
       const { amount, fx } = readAmount(fd);
       if (paidFor(mid, period) >= fee) fail(`${pFR(period)} est déjà réglé pour ce membre. Choisissez un autre mois.`);
-      const t = must(await sb.from('transactions').insert({
-        association_id: S.ctx.assoc.id, kind: 'in', category: 'Cotisations', amount, occurred_on: val(fd, 'occurred_on') || todayISO(),
-        description: 'Cotisation de ' + pFR(period), member_id: mid, period, payment_method: val(fd, 'payment_method'), comment: val(fd, 'comment'), ...fx
-      }).select('*').single());
-      await refresh(); toast('Paiement enregistré'); go(B() + '/op/' + t.id + '?recu=1');
+      const parts = fx.orig_currency ? [{ period, amount }] : spread(m, period, amount);
+      if (!parts) fail('Ce montant couvre plus de 24 mois. Vérifiez le montant.');
+      const base = { association_id: S.ctx.assoc.id, kind: 'in', category: 'Cotisations', occurred_on: val(fd, 'occurred_on') || todayISO(),
+        member_id: mid, payment_method: val(fd, 'payment_method') };
+      const note = val(fd, 'comment'), many = parts.length > 1;
+      // Une seule demande à la base : soit tous les mois sont enregistrés, soit aucun.
+      const rows = must(await sb.from('transactions').insert(parts.map(x => ({ ...base, amount: x.amount, period: x.period, description: 'Cotisation de ' + pFR(x.period),
+        comment: many ? [note, `Paiement de ${money(amount)} réparti sur ${parts.length} mois.`].filter(Boolean).join(' ') : note, ...(many ? {} : fx) }))).select('id'));
+      await refresh();
+      if (many) { toast(`Paiement réparti sur ${parts.length} mois`); return go(B() + '/m/' + mid); }
+      toast('Paiement enregistré'); go(B() + '/op/' + rows[0].id + '?recu=1');
     },
     async op(fd, form) {
       const kind = form.dataset.type === 'out' ? 'out' : 'in', colId = val(fd, 'collection_id') || null, mid = val(fd, 'member_id') || null;
