@@ -516,3 +516,9 @@ summary{min-height:44px}
 @media (max-width:359px){.tab .ic{width:46px} .tabs-in{padding:6px 2px 8px}}
 /* v2.3.2 : tableau de bord du propriétaire */
 .admin h3{font-size:16px;font-weight:700;margin:6px 0 0}
+/* v2.3.3 : liste des retardataires du rapport mensuel */
+.names{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+.names li{padding:6px 0;border-bottom:1px solid var(--color-border);overflow-wrap:anywhere}
+.names li:last-child{border-bottom:0}
+.print-only{display:none}
+@media print{.print-only{display:block}.names.cols{display:block;columns:3;column-gap:16px;font-size:11px}.names.cols li{padding:1px 0;border:0;break-inside:avoid}}

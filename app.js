@@ -1979,7 +1979,15 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
     const tot = new Map(ptot.map(x => [x.project_id, x]));
     const months = []; for (let k = 0; k < 12; k++) months.push(addMonthYM(cur, -k));
     const title = `Rapport ${deM(M)}`;
-    const wa = `${title.toUpperCase()} · ${a.name}\n\nSolde au début du mois : ${money(open)}\nEntrées : +${money(inM)}\nSorties : −${money(outM)}\nSolde à la fin du mois : ${money(close)}${fee ? `\n\nCotisations : ${paidN} membre${paidN > 1 ? 's' : ''} sur ${dueNow.length} à jour (${money(collected)} sur ${money(expected)})` : ''}${meets.length ? `\nRéunions : ${meets.length}` : ''}${polls.length ? `\nVotes clos : ${polls.length}` : ''}\n\nDétails dans l’application :\n${shortLink('rapport', a.id, 'm=' + M)}`;
+    const wa = `${title.toUpperCase()} · ${a.name}\n\nSolde au début du mois : ${money(open)}\nEntrées : +${money(inM)}\nSorties : −${money(outM)}\nSolde à la fin du mois : ${money(close)}${fee ? `\n\nCotisations : ${paidN} membre${paidN > 1 ? 's' : ''} sur ${dueNow.length} à jour (${money(collected)} sur ${money(expected)})${unpaid.length ? `\nPas encore payé : ${unpaid.length} membre${unpaid.length > 1 ? 's' : ''}` : ''}` : ''}${meets.length ? `\nRéunions : ${meets.length}` : ''}${polls.length ? `\nVotes clos : ${polls.length}` : ''}\n\nDétails dans l’application :\n${shortLink('rapport', a.id, 'm=' + M)}`;
+    // Retardataires : le nombre, 10 noms, puis la liste complète à la demande (un nom par ligne) ; toute la liste en colonnes dans le PDF
+    const unpaidBlock = list => {
+      const names = list.map(m => m.full_name).sort((x, y) => x.localeCompare(y, 'fr')), li = n => `<li>${esc(n)}</li>`, k = names.length;
+      return `<span class="eyebrow">Pas encore payé : ${k} membre${k > 1 ? 's' : ''}</span>
+        <div class="no-print stack" style="gap:4px"><ul class="names">${names.slice(0, 10).map(li).join('')}</ul>
+        ${k > 10 ? `<details class="more"><summary>Voir les ${k - 10} autres</summary><ul class="names">${names.slice(10).map(li).join('')}</ul></details>` : ''}</div>
+        <ul class="names cols print-only">${names.map(li).join('')}</ul>`;
+    };
     const catList = rows => rows.length ? `<dl class="kv num" style="margin:0">${rows.map(([c, v]) => `<dt>${esc(c)}</dt><dd>${money(v)}</dd>`).join('')}</dl>` : '<span class="muted">Aucune.</span>';
     return `<div class="no-print">${subHead('Rapport mensuel', B() + '/transparence')}</div>
       <div class="field no-print"><label for="rp-m">Mois</label><select id="rp-m" data-nav="rapport">${months.map(x => opt(x, pFR(x).replace(/^./, c => c.toUpperCase()), M)).join('')}</select></div>
@@ -1989,7 +1997,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
         <section class="card stack"><h2>Caisse</h2><dl class="kv num" style="margin:0"><dt>Solde au début du mois</dt><dd>${money(open)}</dd><dt>Entrées du mois</dt><dd style="color:var(--green)">${inM ? '+' : ''}${money(inM)}</dd><dt>Sorties du mois</dt><dd style="color:var(--danger)">${outM ? '−' : ''}${money(outM)}</dd><dt><b>Solde à la fin du mois</b></dt><dd><b>${money(close)}</b></dd></dl></section>
         ${fee ? `<section class="card stack"><div class="between"><h2>Cotisations ${esc(deM(M))}</h2><span class="pill p-blue num">${paidN}/${dueNow.length} à jour</span></div>
           <div class="bar"><i style="width:${pct(collected, expected)}%"></i></div><span class="muted num">${money(collected)} encaissés sur ${money(expected)} attendus</span>
-          ${unpaid.length ? `<span class="eyebrow">Pas encore payé (${unpaid.length})</span><p style="margin:0">${unpaid.map(m => esc(m.full_name)).join(', ')}</p>` : '<span class="ok-msg">Tout le monde a payé ce mois-ci.</span>'}</section>` : ''}
+          ${unpaid.length ? unpaidBlock(unpaid) : '<span class="ok-msg">Tout le monde a payé ce mois-ci.</span>'}</section>` : ''}
         <section class="card stack"><h2>Entrées par catégorie</h2>${catList(byCat('in'))}</section>
         <section class="card stack"><h2>Dépenses par catégorie</h2>${catList(byCat('out'))}</section>
         ${meets.length ? `<section class="card stack"><h2>Réunions</h2>${meets.map(m => `<div><b>${esc(m.title)}</b> · ${esc(dLong(m.starts_at))} · <span class="pill ${MEET_PILL[m.status]}">${esc(m.status)}</span>${m.minutes ? `<p class="muted" style="margin:4px 0 0;white-space:pre-line">${esc(m.minutes.slice(0, 600))}${m.minutes.length > 600 ? '…' : ''}</p>` : ''}</div>`).join('')}</section>` : ''}
