@@ -1125,8 +1125,8 @@
       : pend ? `<p class="note" style="margin:0">Votre paiement de ${money(pend.amount, 'XOF')} est en attente : VillageLink l’active dès qu’il l’a reçu, en général dans la journée.</p>`
       : `<form class="stack" data-form="subreq" id="sub-form" hidden novalidate>
         <input type="hidden" name="plan" value="${q12 ? q12.plan : ''}">
-        <div class="radios" role="radiogroup" aria-label="Durée"><label><input type="radio" name="months" value="12" data-amt="${q12 ? q12.amount : 0}" checked>1 an${q12 && q12.discounted ? ' (tarif fondatrice)' : ''}</label><label><input type="radio" name="months" value="1" data-amt="${q1 ? q1.amount : 0}">1 mois</label></div>
-        <section class="card stack"><div class="between"><span class="muted">Montant à payer</span><b class="num" id="sub-amt" style="font-size:22px"></b></div>
+        <div class="radios" role="radiogroup" aria-label="Durée" hidden><label><input type="radio" name="months" value="12" data-amt="${q12 ? q12.amount : 0}" checked>1 an${q12 && q12.discounted ? ' (tarif fondatrice)' : ''}</label><label><input type="radio" name="months" value="1" data-amt="${q1 ? q1.amount : 0}">1 mois</label></div>
+        <section class="card stack"><div class="between"><span class="muted" id="sub-dur">Montant à payer</span><b class="num" id="sub-amt" style="font-size:22px"></b></div>
           <a class="btn block wave-btn" id="sub-wave" target="_blank" rel="noopener" href="#">Payer avec Wave</a>
           <p class="help" style="margin:0">Wave s’ouvre avec le montant déjà rempli, au nom de VillageLink. Revenez ensuite ici.</p></section>
         <div class="field"><label for="sub-r">Référence du paiement Wave (ID de transaction)</label><input id="sub-r" name="reference" maxlength="60" autocapitalize="characters" placeholder="T_…"></div>
@@ -1139,7 +1139,7 @@
     const f = document.querySelector('form[data-form=subreq]'); if (!f) return;
     const upd = () => {
       const amt = Number((f.querySelector('input[name=months]:checked') || {}).dataset.amt || 0);
-      $('#sub-amt').textContent = money(amt, 'XOF'); $('#sub-wave').href = VL_WAVE + '?amount=' + amt; $('#sub-wave').textContent = 'Payer ' + money(amt, 'XOF') + ' avec Wave';
+      const mo = (f.querySelector('input[name=months]:checked') || {}).value; $('#sub-dur').textContent = 'Montant à payer · ' + (mo === '1' ? '1 mois' : '1 an'); $('#sub-amt').textContent = money(amt, 'XOF'); $('#sub-wave').href = VL_WAVE + '?amount=' + amt; $('#sub-wave').textContent = 'Payer ' + money(amt, 'XOF') + ' avec Wave';
     };
     f.addEventListener('change', upd); upd();
   };
