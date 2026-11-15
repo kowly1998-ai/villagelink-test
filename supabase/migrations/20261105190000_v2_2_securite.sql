@@ -21,7 +21,7 @@ begin
   if length(trim(coalesce(p_full_name,''))) < 2 then raise exception 'Saisissez votre nom complet.'; end if;
   delete from join_attempts where at < now() - interval '1 day';
   if (select count(*) from join_attempts where user_id = auth.uid() and at > now() - interval '15 minutes') >= 8 then
-    raise exception 'Trop d''essais. Réessayez dans 15 minutes.';
+    raise exception 'Trop d’essais. Réessayez dans 15 minutes.';
   end if;
   select id into a from associations where invite_code = upper(trim(p_code));
   if a is null then

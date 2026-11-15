@@ -42,7 +42,10 @@
   const moneyD = (n, cur) => nf2.format(Number(n) || 0).replace(/[\u202f\u00a0 ]/g, NB) + NB + (CUR_LABEL[cur] || cur);
   const rateFmt = r => new Intl.NumberFormat('fr-FR', { maximumFractionDigits: 6 }).format(Number(r)).replace(/[\u202f\u00a0 ]/g, NB);
   const origTag = t => (t && t.orig_currency ? moneyD(Math.abs(t.orig_amount), t.orig_currency) : '');
-  const todayISO = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+  // Écart entre l'horloge du téléphone et celle du serveur (audit B6) : un téléphone mal réglé
+  // ne doit pas afficher de faux retards. Mis à jour par loadCtx, gardé tel quel hors connexion.
+  let clockSkew = 0;
+  const todayISO = () => { const d = new Date(Date.now() + clockSkew); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
   const curYM = () => todayISO().slice(0, 7);
   const ym = d => String(d || '').slice(0, 7);
   const dFR = d => { if (!d) return ''; const s = String(d); if (s.length > 10) { const x = new Date(s); return `${x.getDate()}${NB}${MOIS[x.getMonth()]} ${x.getFullYear()}`; } const [y, m, da] = s.split('-').map(Number); return `${da}${NB}${MOIS[m - 1]} ${y}`; };
@@ -88,6 +91,11 @@
     return m;
   }
   function must(res) { if (res.error) throw res.error; return res.data; }
+  // Numéro de saisie (audit B7) : tiré au hasard quand un formulaire d'argent s'affiche. Si le même
+  // formulaire est envoyé deux fois (connexion coupée, double appui), la base refuse le doublon.
+  const newRef = () => { const b = new Uint8Array(16); crypto.getRandomValues(b); return Array.from(b, x => x.toString(16).padStart(2, '0')).join(''); };
+  const refField = () => `<input type="hidden" name="client_ref" value="${newRef()}">`;
+  const isDup = e => !!e && e.code === '23505' && /client_ref/.test(e.message || '');
   async function fetchAll(make, size = 1000) {
     const out = [];
     for (let from = 0; from < 100000; from += size) {
@@ -152,6 +160,9 @@
     cover: ['president', 'vice_president', 'secretaire']
   };
   /* Essai gratuit et abonnement --------------------------------------- */
+  // v2.3.1 : plus de limite. Le prix suit le nombre de membres (même grille que la base : tier_for / plan_price).
+  const TIERS = [{ k: 'petite', label: 'Petite', max: 30, month: 2000, year: 20000 }, { k: 'moyenne', label: 'Moyenne', max: 100, month: 5000, year: 50000 }, { k: 'grande', label: 'Grande', max: 300, month: 10000, year: 100000 }];
+  const tierFor = n => TIERS.find(t => n <= t.max) || null;
   const PLANS = { association: { label: 'Village', max: 50, month: 5000, year: 50000 }, federation: { label: 'Diaspora', max: 200, month: 10000, year: 100000 } };
   const VL_WAVE = 'https://pay.wave.com/m/M_Ec4ZLH3AZsSi/c/sn/'; // lien Wave de VillageLink pour les abonnements
   const IS_TWA = (() => { try { if (document.referrer.startsWith('android-app://')) sessionStorage.setItem('vl:twa', '1'); return sessionStorage.getItem('vl:twa') === '1'; } catch (e) { return false; } })();
@@ -167,7 +178,8 @@
     return plusDays(end, 7) >= t ? 'grace' : 'readonly';
   };
   // Formule Village : sans sections, catégories ni plusieurs monnaies, 50 membres au plus. Essai et Diaspora : tout.
-  const fullPlan = () => !S.ctx || S.ctx.assoc.plan !== 'association';
+  // v2.3.1 : toutes les fonctions pour tout le monde (plus de limite selon la formule).
+  const fullPlan = () => true;
   const upsell = what => canManageSub() && !IS_TWA ? `<a class="card stack upsell" href="${B()}/abonnement" style="text-decoration:none"><span class="eyebrow">Formule Diaspora</span><b>${what}</b><span class="muted" style="font-size:14px">Disponible avec la formule Diaspora : toutes les fonctionnalités, jusqu’à 200 membres.</span></a>` : `<p class="note">${what} : disponible avec la formule Diaspora. Parlez-en au président.</p>`;
   const isRO = () => !!(S.ctx && ['readonly', 'blocked'].includes(subStatus(S.ctx.assoc)));
   const canManageSub = () => !!(S.ctx && S.ctx.me && ['president', 'vice_president', 'tresorier'].includes(S.ctx.me.role));
@@ -199,6 +211,7 @@
     const soft = q => q.then(r => (r.error ? null : r.data), () => null);
     const MCOLS = 'id,association_id,user_id,full_name,city,country,role,joined_on,active,created_at,pending,created_by_join,section_id,category_id';
     const seenKey = 'vl:notif:' + id, seen = Number(store.get(seenKey) || 0);
+    const t0 = Date.now(), clockP = sb.rpc('server_now').then(r => (r.error ? null : r.data), () => null);
     const [a, members, paid, bal, contacts, msg, log, newLog, sectionsR, catsR, exemptsR, payNumsR, claimsR, expR, feeH, catH] = await Promise.all([
       sb.from('associations').select('*').eq('id', id).maybeSingle().then(must),
       fetchAll(() => sb.from('members').select(MCOLS).eq('association_id', id).order('full_name').order('id')),
@@ -218,6 +231,8 @@
       soft(sb.from('member_category_history').select('member_id,category_id,from_period').eq('association_id', id).order('from_period').limit(5000))
     ]);
     if (!a) { S.ctx = null; return null; }
+    const srv = Date.parse(await clockP || '');
+    if (srv) { const skew = srv - (t0 + Date.now()) / 2; clockSkew = Math.abs(skew) > 120000 ? skew : 0; }
     // Téléphone et e-mail : seulement ceux que la base autorise (bureau : tous ; membre : sa fiche et le bureau).
     const cmap = new Map((contacts || []).map(c => [c.id, c]));
     members.forEach(m => { const c = cmap.get(m.id); m.phone = c ? c.phone || '' : ''; m.email = c ? c.email || '' : ''; });
@@ -341,6 +356,7 @@
       if (parts[0] === 'bienvenue') return await renderWelcome();
       if (parts[0] === 'admin') return await renderAdmin();
       if (parts[0] === 'a' && parts[1]) return await renderAssoc(parts[1], parts.slice(2), q);
+      if (SHORT[parts[0]] && /^[0-9a-f]{8}$/i.test(parts[1] || '')) return await openShort(parts[0], parts[1].toLowerCase(), q);
       return await goHome();
     } catch (e) {
       console.error(e);
@@ -357,6 +373,24 @@
     if (list.length === 1) return go('#/a/' + list[0].id);
     if (last && list.some(a => a.id === last)) return go('#/a/' + last);
     return go('#/bienvenue');
+  }
+
+  // Liens courts partagés sur WhatsApp : #/r/<8 premiers caractères de l'id>. La base ne renvoie
+  // que ce que la personne a le droit de voir ; on retrouve la page complète puis on l'ouvre.
+  const SHORT = {
+    r: { table: 'meetings', cols: 'id,association_id', path: x => `/a/${x.association_id}/r/${x.id}` },
+    v: { table: 'polls', cols: 'id,association_id', path: x => `/a/${x.association_id}/vote/${x.id}` },
+    rapport: { table: 'associations', cols: 'id', path: (x, q) => `/a/${x.id}/rapport${String(q) ? '?' + q : ''}` }
+  };
+  async function openShort(kind, p, q) {
+    const t = SHORT[kind];
+    const rows = must(await sb.from(t.table).select(t.cols).gte('id', p + '-0000-0000-0000-000000000000').lte('id', p + '-ffff-ffff-ffff-ffffffffffff').limit(2));
+    if (rows.length !== 1) {
+      root.innerHTML = `<div class="auth"><section class="card stack"><h2>Lien introuvable</h2><p class="muted" style="margin:0">Cette page n’existe plus, ou elle appartient à une association dont vous n’êtes pas membre.</p><a class="btn primary" href="#/">Mes associations</a></section></div>`;
+      return;
+    }
+    history.replaceState(null, '', '#' + t.path(rows[0], q));
+    return route();
   }
 
   /* ------------------------------------------------------------------
@@ -562,12 +596,23 @@
   }
 
   const B = () => '#/a/' + S.ctx.assoc.id;
+  // Bandeau d'information (jamais bloquant) : le nombre de membres dépasse la formule payée. Visible du bureau seulement.
+  function overflowBanner(a, st) {
+    if (!canManageSub() || st !== 'active') return '';
+    const cur = TIERS.find(t => t.k === a.plan); if (!cur) return '';
+    const n = activeMembers().length; if (n <= cur.max) return '';
+    const nt = tierFor(n);
+    const txt = nt ? `Au prochain renouvellement, la formule ${nt.label} s’appliquera (${money(nt.year, 'XOF')} par an). Rien n’est bloqué d’ici là.` : 'Au-delà de 300 membres, le tarif est sur devis : écrivez à contact@villagelinkafrica.com. Rien n’est bloqué.';
+    return `<section class="card stack sub-banner sub-info"><b>${num(n)} membres : plus que les ${cur.max} de votre formule ${cur.label}.</b><span>${txt}</span></section>`;
+  }
   function subBanner() {
     const a = S.ctx.assoc, st = subStatus(a), go = canManageSub() && !IS_TWA ? `<a class="btn primary sm" href="${B()}/abonnement">${st === 'active' ? 'Renouveler' : 'Activer l’abonnement'}</a>` : '';
     const end = [a.paid_until, a.trial_ends].filter(Boolean).sort().pop();
     if (st === 'blocked') return `<section class="card stack sub-banner sub-bad"><b>Association suspendue par VillageLink.</b><span>Motif : ${esc(a.blocked_reason || 'non précisé')}. Tout reste consultable, mais on ne peut plus rien enregistrer. Écrivez à contact@villagelinkafrica.com.</span></section>`;
     if (st === 'readonly') return `<section class="card stack sub-banner sub-bad"><b>L’essai gratuit est terminé : l’association est en lecture seule.</b><span>Tout reste consultable (caisse, historique, membres), mais on ne peut plus rien enregistrer.${canManageSub() ? '' : ' Prévenez le président.'}</span>${go}</section>`;
     if (st === 'grace') return `<section class="card stack sub-banner sub-warn"><b>${a.paid_until ? 'L’abonnement' : 'L’essai gratuit'} s’est terminé le ${dFR(end)}.</b><span>Plus que ${Math.max(daysUntil(plusDays(end, 7)), 0)} jour(s) avant le passage en lecture seule.</span>${go}</section>`;
+    const over = overflowBanner(a, st);
+    if (over && !['blocked', 'readonly', 'grace'].includes(st)) return over;
     if (st === 'trial' && canManageSub() && a.trial_ends && daysUntil(a.trial_ends) <= 15) return `<section class="card stack sub-banner sub-info"><b>Essai gratuit : plus que ${daysUntil(a.trial_ends)} jour(s).</b><span>Il se termine le ${dFR(a.trial_ends)}. Choisissez une formule pour continuer sans interruption.</span>${go}</section>`;
     if (st === 'active' && canManageSub() && daysUntil(a.paid_until) <= 10) return `<section class="card stack sub-banner sub-warn"><b>L’abonnement se termine le ${dFR(a.paid_until)}.</b>${go}</section>`;
     return '';
@@ -680,8 +725,10 @@
       act.length <= 1 && can('members') ? todo(`${B()}/membres/import`, I.list, 'Ajoutez la liste des membres', 'Collez-la depuis votre cahier, Excel ou WhatsApp.', false) : ''
     ].join('');
     const monthCard = fee && (pres || trea) && dueNow.length ? `<section class="card stack"><div class="between"><span class="eyebrow">${esc(monthName)}</span><b class="num">${paidCount} sur ${dueNow.length} ont payé</b></div><div class="bar"><i style="width:${pct(collected, expected)}%"></i></div><span class="muted num" style="font-size:14px">${money(collected)} sur ${money(expected)} collectés</span></section>` : '';
+    // Montant au milliard (francs guinéens) : chiffre plus petit, la monnaie passe à la ligne si besoin.
+    const boxSm = n => (String(Math.round(Math.abs(Number(n) || 0))).length >= 10 ? ' class="sm"' : '');
     const presCash = `<section class="card hero"><span class="eyebrow">Dans la caisse</span><div class="big num${fit(solde)}">${num(solde)} <span class="cur">${CURL}</span></div>
-      <div class="boxes num"><div><small>Entrées ce mois</small><b>+ ${money(inMonth)}</b></div><div><small>Sorties ce mois</small><b>− ${money(outMonth)}</b></div></div>
+      <div class="boxes num"><div><small>Entrées ce mois</small><b${boxSm(inMonth)}>+${NB}${moneyW(inMonth)}</b></div><div><small>Sorties ce mois</small><b${boxSm(outMonth)}>−${NB}${moneyW(outMonth)}</b></div></div>
       <div class="foot"><span>${act.length} membre${act.length > 1 ? 's' : ''} · vérifiable par tous</span><a href="${B()}/transparence">Où va l’argent</a></div></section>`;
     const cash = `<section class="card stack"><span class="eyebrow">Dans la caisse de l’association</span><div class="status-card"><div class="big num${fit(solde)}">${num(solde)}<small>${CURL}</small></div></div><a class="link" href="${B()}/transparence">Voir où va l’argent ${I.chev}</a></section>`;
     const outs = catTot.filter(c => c.kind === 'out' && Number(c.total) > 0).sort((x, y) => y.total - x.total).slice(0, 4), maxOut = outs[0] ? Number(outs[0].total) : 0;
@@ -694,8 +741,23 @@
     const pollCard = toVote.length && S.ctx.me.user_id ? `<a class="card poll-next" href="${B()}/vote/${toVote[0].id}"><span class="ico">${I.vote}</span><span class="body"><span class="eyebrow">Vote en cours${toVote.length > 1 ? ' · ' + toVote.length + ' votes' : ''}</span><b>${esc(toVote[0].question)}</b><span class="muted">Donnez votre avis</span></span><span class="chev">${I.chev}</span></a>` : '';
     const meetCard = nextMeet.length ? `<a class="card meet-next" href="${B()}/r/${nextMeet[0].id}">${dateBox(nextMeet[0].starts_at)}<span class="body"><span class="eyebrow">Prochaine réunion</span><b>${esc(nextMeet[0].title)}</b><span class="muted">${esc(hm(nextMeet[0].starts_at))}${nextMeet[0].place ? ' · ' + esc(nextMeet[0].place) : ''}</span></span><span class="chev">${I.chev}</span></a>` : '';
     const colCards = openCols.map(c => colCard(c, colTot.get(c.id), true)).join('');
+    // Audit S9 : les numéros Wave / Orange / Free changés par quelqu'un d'autre sont signalés au président
+    // et au vice-président, jusqu'à ce qu'ils confirment (par téléphone : vl:paynum:<asso>).
+    const pn = S.ctx.payNums, pnKey = 'vl:paynum:' + a.id;
+    const payAlert = pres && pn && pn.updated_by && pn.updated_by !== S.user.id && pn.updated_at
+      && Date.now() - Date.parse(pn.updated_at) < 60 * 864e5 && store.get(pnKey) !== pn.updated_at
+      ? (() => {
+        const who = (S.ctx.members.find(m => m.user_id === pn.updated_by) || {}).full_name || 'Un membre du bureau';
+        const rows = MM.map(([l, k]) => `<dt>${l}</dt><dd>${pn[k] ? esc(pn[k]) : '<span class="muted">aucun</span>'}</dd>`).join('')
+          + `<dt>Au nom de</dt><dd>${pn.holder ? esc(pn.holder) : '<span class="muted">—</span>'}</dd>`;
+        return `<section class="card stack pay-alert" role="alert"><div class="between"><h2>Numéros de paiement changés</h2><span class="pill p-late">À vérifier</span></div>
+          <p style="margin:0">${esc(who)} a changé les numéros où les membres envoient leurs cotisations, le ${dFR(pn.updated_at)} à ${hm(pn.updated_at)}.</p>
+          <dl class="kv num" style="margin:0">${rows}</dl>
+          <p class="muted" style="margin:0;font-size:15px">Vérifiez que ce sont bien les numéros de l’association. Sinon, corrigez-les dans les Paramètres et parlez-en au bureau.</p>
+          <div class="row" style="flex-wrap:wrap;gap:8px"><button class="btn primary" data-act="paynum-ok" data-at="${esc(pn.updated_at)}">Ce sont les bons numéros</button><a class="btn ghost" href="${B()}/parametres">Corriger</a></div></section>`;
+      })() : '';
     let L, R;
-    if (pres) { L = [greet, presCash, status, todos, where, monthCard]; R = [projCard, pollCard, meetCard, colCards, opsCard, actCard]; }
+    if (pres) { L = [greet, payAlert, presCash, status, todos, where, monthCard]; R = [projCard, pollCard, meetCard, colCards, opsCard, actCard]; }
     else if (trea) { L = [greet, status, todos, monthCard, shortcuts, pollCard, meetCard, colCards]; R = [cash, lateCard, opsCard, projCard, actCard]; }
     else { L = [greet, status, todos, cash, pollCard, meetCard, colCards, projCard]; R = [opsCard, actCard]; }
     return `${coverBanner}<div class="home-grid"><div class="home-l">${L.join('')}</div><div class="home-r">${R.join('')}</div></div>`;
@@ -871,6 +933,7 @@
     if (f === 'claims') {
       list = `<p class="note" style="margin:0"><b>Avant de confirmer</b>, ouvrez VOTRE application Wave, Orange Money ou Free Money et vérifiez que l’argent est bien arrivé. Ne vous fiez jamais à un SMS ni à une capture d’écran. Wave permet d’annuler un envoi pendant une heure : pour un paiement Wave très récent, attendez une heure avant de confirmer.</p>
         <div class="list">${toConf.map(c => { const m = S.ctx.byId.get(c.member_id) || { full_name: '?' }; return `<div class="item" style="flex-wrap:wrap"><div class="av">${esc(initials(m.full_name))}</div><div class="body"><div class="t">${esc(m.full_name)}</div><div class="s wrap num"><b style="color:var(--ink)">${money(c.amount)}</b> par ${esc(c.method)} · ${esc(pFR(c.period))}<br>Envoyé au ${esc(c.sent_to)} · déclaré le ${dFR(localDay(c.created_at))} à ${hm(c.created_at)}${c.reference ? '<br>Réf. ' + esc(c.reference) : '<br>Sans référence'}</div>
+          ${m.id && feeOf(m, c.period) > 0 && paidFor(m.id, c.period) >= feeOf(m, c.period) ? `<p class="note" style="margin:8px 0 0"><b>Le mois de ${esc(pFR(c.period))} est déjà payé</b> pour ce membre. Si c’est le même argent, refusez cette déclaration.</p>` : ''}
           ${c.created_by === S.user.id || m.user_id === S.user.id ? '<p class="help" style="margin:8px 0 0">C’est votre propre paiement : un autre membre du bureau doit le confirmer.</p>' : `<div class="row" style="margin-top:8px;flex-wrap:wrap"><button class="btn primary sm" data-act="claim-ok" data-id="${c.id}">Confirmer la réception</button><button class="btn ghost sm" data-act="claim-no" data-id="${c.id}">Refuser</button></div>`}
           <form class="stack" data-form="rejectclaim" data-id="${c.id}" id="rjc-${c.id}" hidden style="margin-top:8px" novalidate><div class="field"><label for="rjc-r-${c.id}">Motif du refus</label><input id="rjc-r-${c.id}" name="reason" placeholder="Ex. rien reçu sur Wave"></div><p class="err" hidden></p><button class="btn danger sm" type="submit">Refuser ce paiement</button></form></div></div>`; }).join('') || '<div class="empty">Aucun paiement à confirmer.</div>'}</div>`;
     } else if (f === 'late') {
@@ -909,7 +972,7 @@
     if (!list.length) return `${subHead('Encaisser', B() + '/cotisations')}<p class="note">Ajoutez d’abord des membres.</p>`;
     const sm = S.ctx.byId.get(sel) || list[0];
     return `${subHead('Encaisser une cotisation', B() + '/cotisations')}
-      <form class="stack" data-form="pay" novalidate>
+      <form class="stack" data-form="pay" novalidate>${refField()}
         <div class="card pay-member"><div class="av" id="pay-av" aria-hidden="true">${esc(initials(sm.full_name))}</div><div style="flex:1;min-width:0"><label for="pay-m" class="sub">Membre</label><select id="pay-m" name="member_id">${list.map(m => opt(m.id, m.full_name + (dues(m).isLate ? ' · en retard' : ''), sel)).join('')}</select><div class="sub" id="pay-cat"></div></div></div>
         <div class="field"><label for="pay-p">Mois concerné</label><select id="pay-p" name="period"></select></div>
         <div class="big-amount"><label for="pay-a" class="muted" style="font-size:14px">Montant (${esc(CUR_LABEL[a.currency] || a.currency)})</label><input id="pay-a" name="amount" type="number" inputmode="decimal" min="0" step="1"><span class="muted num" id="pay-rule" style="font-size:11.5px"></span><p class="help num" id="pay-conv" hidden></p></div>
@@ -1154,7 +1217,7 @@
       const mem = activeMembers().slice().sort((x, y) => x.full_name.localeCompare(y.full_name, 'fr'));
       return `${subHead(type === 'out' ? 'Remise de la collecte' : 'Contribution', back)}
       <p class="note"><b>${esc(col.title)}</b>${col.beneficiary ? ' · ' + esc(col.beneficiary) : ''}${approval ? '<br>La remise sera envoyée au président ou au vice-président pour approbation.' : ''}</p>
-      <form class="stack" data-form="op" data-type="${type}" novalidate><input type="hidden" name="collection_id" value="${esc(col.id)}">
+      <form class="stack" data-form="op" data-type="${type}" novalidate>${refField()}<input type="hidden" name="collection_id" value="${esc(col.id)}">
         <input type="hidden" name="category" value="${type === 'out' ? 'Autres' : 'Contributions exceptionnelles'}">
         ${type === 'in' ? `<div class="field"><label for="op-m">Contributeur</label><select id="op-m" name="member_id"><option value="">Une personne hors de l’association</option>${mem.map(m => opt(m.id, m.full_name)).join('')}</select></div>` : ''}
         ${fxFields('op')}
@@ -1169,7 +1232,7 @@
     return `${subHead(approval ? 'Proposer une dépense' : type === 'out' ? 'Nouvelle dépense' : 'Nouvelle recette', B() + '/finances')}
       ${approval ? '<p class="note">Double validation : la dépense n’entrera dans la caisse qu’après l’approbation du président ou du vice-président. Joignez le reçu pour l’aider à décider.</p>' : ''}
       ${type === 'in' ? `<p class="note">Pour une cotisation mensuelle, utilisez plutôt <a class="link" href="${B()}/encaisser">Enregistrer un paiement</a> : le membre sera marqué à jour.</p>` : ''}
-      <form class="stack" data-form="op" data-type="${type}" novalidate>
+      <form class="stack" data-form="op" data-type="${type}" novalidate>${refField()}
         <div class="field"><label for="op-cat">Catégorie</label><select id="op-cat" name="category">${cats.map(c => opt(c, c, pre && type === 'in' ? 'Dons' : pre ? 'Projet' : '')).join('')}</select></div>
         ${fxFields('op')}
         <div class="field"><label for="op-a">Montant (${esc(CUR_LABEL[S.ctx.assoc.currency] || S.ctx.assoc.currency)})</label><input id="op-a" name="amount" type="number" inputmode="decimal" min="0" step="1" required><p class="help num" id="op-conv" hidden></p></div>
@@ -1535,7 +1598,7 @@
     if (p.public_slug) {
       const url = pubUrl(p), share = `${p.name} — ${S.ctx.assoc.name}\nDéjà ${money(c)} collectés sur ${money(p.goal)} (${pc} %).\nSuivez le projet en toute transparence, et participez :\n${url}`;
       return `<section class="card stack pub-card"><div class="between"><h2>Page publique</h2><span class="pill p-ok">En ligne</span></div>
-        <p class="muted" style="margin:0;font-size:14px">Tout le monde peut voir ce projet avec ce lien, même sans compte : objectif, argent collecté, dépenses et nouvelles. Aucun nom ni numéro de membre n’y apparaît.</p>
+        <p class="muted" style="margin:0;font-size:14px">Tout le monde peut voir ce projet avec ce lien, même sans compte : objectif, argent collecté, dépenses (catégorie, date et montant seulement) et nouvelles. Aucun nom ni numéro de membre n’y apparaît. N’écrivez pas de nom de personne dans les nouvelles : elles sont publiques.</p>
         <a class="link" style="word-break:break-all" target="_blank" rel="noopener" href="${esc(url)}">${esc(url)}</a>
         <a class="btn wa block" target="_blank" rel="noopener" href="${waShare(share)}">${I.wa} Partager la page sur WhatsApp</a>
         ${can('projects') ? `<form class="stack" data-form="ppublic" data-id="${p.id}" data-on="1" novalidate><div class="field"><label for="pp-c">Comment donner (affiché sur la page)</label><input id="pp-c" name="contact" maxlength="300" value="${esc(p.public_contact)}" placeholder="Ex. Wave ou Orange Money au +221 77 000 00 00 (trésorier)"></div><p class="err" hidden></p><button class="btn ghost sm" type="submit">Enregistrer</button></form>
@@ -1568,7 +1631,8 @@
   const MEET_PILL = { Prévue: 'p-blue', Tenue: 'p-ok', Annulée: 'p-red' };
   const dateBox = ts => { const x = new Date(ts); return `<span class="datebox" aria-hidden="true"><small>${MOIS[x.getMonth()].replace('.', '')}</small><b>${x.getDate()}</b></span>`; };
   const appLink = path => location.origin + location.pathname + '#' + path;
-  const convText = m => `CONVOCATION · ${S.ctx.assoc.name}\n\n${m.title}\nDate : ${dLong(m.starts_at)}${m.place ? '\nLieu : ' + m.place : ''}${m.agenda ? '\n\nOrdre du jour :\n' + m.agenda : ''}\n\nVotre présence est importante.\n${appLink('/a/' + S.ctx.assoc.id + '/r/' + m.id)}`;
+  const shortLink = (kind, id, qs) => appLink('/' + kind + '/' + String(id).slice(0, 8) + (qs ? '?' + qs : ''));
+  const convText = m => `CONVOCATION · ${S.ctx.assoc.name}\n\n${m.title}\nDate : ${dLong(m.starts_at)}${m.place ? '\nLieu : ' + m.place : ''}${m.agenda ? '\n\nOrdre du jour :\n' + m.agenda : ''}\n\nVotre présence est importante.\n${shortLink('r', m.id)}`;
   const meetItem = m => `<a class="card meet-row" href="${B()}/r/${m.id}">${dateBox(m.starts_at)}<span class="body"><b>${esc(m.title)}</b><span class="muted">${esc(hm(m.starts_at))}${m.place ? ' · ' + esc(m.place) : ''}</span></span><span class="pill ${MEET_PILL[m.status]}">${esc(m.status)}</span></a>`;
 
   V.reunions = async (sub) => {
@@ -1693,7 +1757,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
     const showRes = !!mine || !open || can('polls');
     const best = Math.max(0, ...res.map(r => Number(r.votes)));
     const canVote = open && S.ctx.me.user_id && S.ctx.me.active && !S.ctx.me.pending;
-    const link = appLink('/a/' + a.id + '/vote/' + p.id);
+    const link = shortLink('v', p.id);
     const share = open ? `VOTE · ${a.name}\n\n${p.question}\nChoix : ${opts.map(o => o.label).join(' / ')}${p.closes_at ? '\nJusqu’au ' + dLong(p.closes_at) : ''}\n\nVotez dans l’application :\n${link}`
       : `RÉSULTAT DU VOTE · ${a.name}\n\n${p.question}\n${opts.map(o => `${o.label} : ${count.get(o.id) || 0}`).join('\n')}\n\n${total} votant${total > 1 ? 's' : ''}`;
     return `${subHead('Vote', B() + '/votes')}
@@ -1848,7 +1912,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
     const tot = new Map(ptot.map(x => [x.project_id, x]));
     const months = []; for (let k = 0; k < 12; k++) months.push(addMonthYM(cur, -k));
     const title = `Rapport ${deM(M)}`;
-    const wa = `${title.toUpperCase()} · ${a.name}\n\nSolde au début du mois : ${money(open)}\nEntrées : +${money(inM)}\nSorties : −${money(outM)}\nSolde à la fin du mois : ${money(close)}${fee ? `\n\nCotisations : ${paidN} membre${paidN > 1 ? 's' : ''} sur ${dueNow.length} à jour (${money(collected)} sur ${money(expected)})` : ''}${meets.length ? `\nRéunions : ${meets.length}` : ''}${polls.length ? `\nVotes clos : ${polls.length}` : ''}\n\nDétails dans l’application :\n${appLink('/a/' + a.id + '/rapport?m=' + M)}`;
+    const wa = `${title.toUpperCase()} · ${a.name}\n\nSolde au début du mois : ${money(open)}\nEntrées : +${money(inM)}\nSorties : −${money(outM)}\nSolde à la fin du mois : ${money(close)}${fee ? `\n\nCotisations : ${paidN} membre${paidN > 1 ? 's' : ''} sur ${dueNow.length} à jour (${money(collected)} sur ${money(expected)})` : ''}${meets.length ? `\nRéunions : ${meets.length}` : ''}${polls.length ? `\nVotes clos : ${polls.length}` : ''}\n\nDétails dans l’application :\n${shortLink('rapport', a.id, 'm=' + M)}`;
     const catList = rows => rows.length ? `<dl class="kv num" style="margin:0">${rows.map(([c, v]) => `<dt>${esc(c)}</dt><dd>${money(v)}</dd>`).join('')}</dl>` : '<span class="muted">Aucune.</span>';
     return `<div class="no-print">${subHead('Rapport mensuel', B() + '/transparence')}</div>
       <div class="field no-print"><label for="rp-m">Mois</label><select id="rp-m" data-nav="rapport">${months.map(x => opt(x, pFR(x).replace(/^./, c => c.toUpperCase()), M)).join('')}</select></div>
@@ -2137,7 +2201,6 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
     async member(fd, form) {
       const id = form.dataset.id, name = val(fd, 'full_name');
       if (name.length < 2) fail('Saisissez le nom complet.');
-      if (!id && !fullPlan() && activeMembers().length >= PLANS.association.max) fail('La formule Village est limitée à 50 membres. Passez à la formule Diaspora (Plus → Abonnement).');
       const email = val(fd, 'email');
       if (email && !/^\S+@\S+\.\S+$/.test(email)) fail('Adresse email invalide.');
       const row = { full_name: name, phone: val(fd, 'phone'), city: val(fd, 'city'), country: val(fd, 'country'), email, joined_on: val(fd, 'joined_on') || todayISO() };
@@ -2157,7 +2220,6 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       await refresh(); toast(id ? 'Fiche enregistrée' : 'Membre ajouté'); go(B() + '/m/' + mid);
     },
     async import(fd) {
-      if (!fullPlan() && activeMembers().length >= PLANS.association.max) fail('La formule Village est limitée à 50 membres. Passez à la formule Diaspora (Plus → Abonnement).');
       const rows = parseImport(fd.get('text'));
       if (!rows.length) fail('Aucun membre reconnu. Mettez un membre par ligne.');
       if (rows.length > 2000) fail('2 000 membres maximum par import.');
@@ -2183,8 +2245,12 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
         member_id: mid, payment_method: val(fd, 'payment_method') };
       const note = val(fd, 'comment'), many = parts.length > 1;
       // Une seule demande à la base : soit tous les mois sont enregistrés, soit aucun.
-      const rows = must(await sb.from('transactions').insert(parts.map(x => ({ ...base, amount: x.amount, period: x.period, description: 'Cotisation de ' + pFR(x.period),
-        comment: many ? [note, `Paiement de ${money(amount)} réparti sur ${parts.length} mois.`].filter(Boolean).join(' ') : note, ...(many ? {} : fx) }))).select('id'));
+      const ref = val(fd, 'client_ref') || null;
+      const res = await sb.from('transactions').insert(parts.map((x, i) => ({ ...base, amount: x.amount, period: x.period, description: 'Cotisation de ' + pFR(x.period),
+        comment: many ? [note, `Paiement de ${money(amount)} réparti sur ${parts.length} mois.`].filter(Boolean).join(' ') : note, ...(many ? {} : fx),
+        client_ref: ref && (many ? `${ref}:${i + 1}` : ref) }))).select('id');
+      if (isDup(res.error)) { await refresh(); toast('Ce paiement était déjà enregistré'); return go(B() + '/m/' + mid); }
+      const rows = must(res);
       await refresh();
       if (many) { toast(`Paiement réparti sur ${parts.length} mois`); return go(B() + '/m/' + mid); }
       toast('Paiement enregistré'); go(B() + '/op/' + rows[0].id + '?recu=1');
@@ -2196,6 +2262,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       const { amount, fx } = readAmount(fd);
       if (desc.length < 2) fail('Ajoutez une description pour que les membres comprennent l’opération.');
       if (kind === 'out' && amount > S.ctx.bal.in - S.ctx.bal.out) fail(`Le montant dépasse le solde disponible (${money(S.ctx.bal.in - S.ctx.bal.out)}).`);
+      const ref = val(fd, 'client_ref') || null;
       let proof_path = '';
       const file = await compress(fd.get('proof'));
       if (file) {
@@ -2205,16 +2272,24 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
         must(await sb.storage.from('proofs').upload(proof_path, file, { contentType: file.type, upsert: false }));
       }
       if (kind === 'out' && S.ctx.assoc.expense_approval) {
-        const r = must(await sb.from('expense_requests').insert({
+        const er = await sb.from('expense_requests').insert({
           association_id: S.ctx.assoc.id, category: val(fd, 'category'), amount, occurred_on: val(fd, 'occurred_on') || todayISO(),
-          description: desc, project_id: val(fd, 'project_id') || null, comment: val(fd, 'comment'), proof_path, collection_id: colId, ...fx
-        }).select('id').single());
+          description: desc, project_id: val(fd, 'project_id') || null, comment: val(fd, 'comment'), proof_path, collection_id: colId, client_ref: ref, ...fx
+        }).select('id').single();
+        if (isDup(er.error)) { await refresh(); toast('Cette dépense était déjà envoyée'); return go(B() + '/depenses'); }
+        const r = must(er);
         await refresh(); toast('Dépense envoyée pour approbation'); return go(B() + '/depense/' + r.id);
       }
-      const t = must(await sb.from('transactions').insert({
+      const tr = await sb.from('transactions').insert({
         association_id: S.ctx.assoc.id, kind, category: val(fd, 'category'), amount, occurred_on: val(fd, 'occurred_on') || todayISO(),
-        description: desc, project_id: val(fd, 'project_id') || null, payment_method: val(fd, 'payment_method'), comment: val(fd, 'comment'), proof_path, collection_id: colId, member_id: mid, ...fx
-      }).select('*').single());
+        description: desc, project_id: val(fd, 'project_id') || null, payment_method: val(fd, 'payment_method'), comment: val(fd, 'comment'), proof_path, collection_id: colId, member_id: mid, client_ref: ref, ...fx
+      }).select('*').single();
+      if (isDup(tr.error)) {
+        const old = await sb.from('transactions').select('id').eq('association_id', S.ctx.assoc.id).eq('client_ref', ref).maybeSingle();
+        await refresh(); toast('Cette opération était déjà enregistrée');
+        return go(old.data ? B() + '/op/' + old.data.id : B() + '/finances');
+      }
+      const t = must(tr);
       await refresh();
       if (colId) { toast(kind === 'out' ? 'Remise enregistrée' : 'Contribution enregistrée'); return go(B() + '/collecte/' + colId); }
       toast(kind === 'out' ? 'Dépense enregistrée' : 'Recette enregistrée'); go(B() + '/op/' + t.id);
@@ -2379,6 +2454,12 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
     },
     async delacct(fd) {
       if (val(fd, 'confirm').trim().toUpperCase() !== 'SUPPRIMER') fail('Tapez SUPPRIMER pour confirmer.');
+      // v2.2.12 : d'abord les fichiers de ses messages vocaux (la base efface ensuite les messages).
+      try {
+        const v = await sb.from('messages').select('audio_path').eq('author_id', S.user.id).neq('audio_path', '');
+        const paths = (v.data || []).map(x => x.audio_path).filter(Boolean);
+        for (let i = 0; i < paths.length; i += 100) await sb.storage.from('voice').remove(paths.slice(i, i + 100));
+      } catch (e) { /* sans connexion : la base efface quand même les messages */ }
       must(await sb.rpc('delete_my_account', { p_confirm: 'SUPPRIMER' }));
       await pushOff(true).catch(() => {}); clearOfflineData();
       await sb.auth.signOut().catch(() => {});
@@ -2463,8 +2544,10 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
     const act = b.dataset.act;
     try {
       if (act === 'auth-mode') { S.authMode = b.dataset.mode; S.authMsg = ''; renderAuth(); }
+      else if (act === 'paynum-ok') { store.set('vl:paynum:' + S.ctx.assoc.id, b.dataset.at); toast('Merci, c’est noté'); route(); }
       else if (act === 'google') {
         b.disabled = true;
+        try { if (/^#\/(r|v|rapport|a)\//.test(location.hash)) sessionStorage.setItem('vl:next', location.hash); } catch (e) { /* stockage indisponible */ }
         const r = await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: location.origin + location.pathname } });
         if (r.error) { b.disabled = false; throw r.error; }
       }
@@ -2711,6 +2794,9 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       S.session = data.session; S.user = data.session ? data.session.user : null;
     } catch (e) { console.error(e); }
     if (/^#access_token=/.test(location.hash)) history.replaceState(null, '', location.pathname + (S.session ? '#/' : ''));
+    // Retour de Google : rouvrir le lien partagé (réunion, vote…) qui avait mené à la connexion.
+    let next = ''; try { next = sessionStorage.getItem('vl:next') || ''; sessionStorage.removeItem('vl:next'); } catch (e) { /* stockage indisponible */ }
+    if (S.session && /^#?\/?$/.test(location.hash) && /^#\/(r|v|rapport|a)\/[\w\-\/?=&]+$/.test(next)) history.replaceState(null, '', location.pathname + next);
     started = true;
     if (S.session && pinGet()) await showLock();
     route();

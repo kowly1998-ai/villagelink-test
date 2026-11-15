@@ -1,7 +1,7 @@
 -- =====================================================================
 -- VillageLink — schéma de base de données (Supabase / PostgreSQL 15+)
--- Photo complète de la base en ligne, vérifiée le 01/11/2026 (version 2.0.2) :
---  tables, colonnes, règles d'accès et code des 83 fonctions identiques à la base.
+-- Photo complète de la base en ligne, vérifiée le 12/11/2026 (version 2.2.4) :
+--  27 tables, 5 vues, code des 90 fonctions identique à la base (seuls des commentaires diffèrent).
 --  À compléter à chaque nouvelle migration.
 -- À coller une seule fois dans Supabase > SQL Editor > New query > Run.
 --
@@ -2858,6 +2858,7 @@ revoke execute on function public.owner_block(uuid, text) from public, anon;
 revoke execute on function public.owner_unblock(uuid) from public, anon;
 grant execute on function public.owner_block(uuid, text) to authenticated;
 grant execute on function public.owner_unblock(uuid) to authenticated;
+
 -- VillageLink 2.2 — Photo de couverture de l'association
 -- Qui peut la changer : président, vice-président, secrétaire. Tout membre la voit.
 
@@ -2900,6 +2901,7 @@ begin
         and public.has_role(((storage.foldername(name))[1])::uuid, array['president','vice_president','secretaire']))$p$;
   end if;
 end $$;
+
 -- VillageLink 2.2 — Renforcements de sécurité
 -- 1. Limite d'essais du code d'invitation (8 essais ratés par 15 minutes et par compte).
 -- 2. assoc_status et is_exempt ne répondent qu'aux membres de l'association (ou au propriétaire,
@@ -2923,7 +2925,7 @@ begin
   if length(trim(coalesce(p_full_name,''))) < 2 then raise exception 'Saisissez votre nom complet.'; end if;
   delete from join_attempts where at < now() - interval '1 day';
   if (select count(*) from join_attempts where user_id = auth.uid() and at > now() - interval '15 minutes') >= 8 then
-    raise exception 'Trop d''essais. Réessayez dans 15 minutes.';
+    raise exception 'Trop d’essais. Réessayez dans 15 minutes.';
   end if;
   select id into a from associations where invite_code = upper(trim(p_code));
   if a is null then
@@ -2996,7 +2998,7 @@ begin
   return new;
 end $$;
 
--- v2.2.3 : contacts réservés au bureau, pas de confirmation de son propre paiement
+-- v2.2.3 : contacts_et_confirmation
 -- (1) Confirmation d'un paiement déclaré : jamais par la personne qui l'a déclaré
 create or replace function public.confirm_payment_claim(p_id bigint) returns bigint
 language plpgsql security definer set search_path = public as $$
@@ -3038,7 +3040,7 @@ $$;
 revoke all on function public.member_contacts(uuid) from public, anon;
 grant execute on function public.member_contacts(uuid) to authenticated;
 
--- v2.2.3 : historique des montants de cotisation
+-- v2.2.3 : historique_cotisations
 
 create table if not exists public.fee_history (
   id bigserial primary key,
@@ -3119,3 +3121,872 @@ create trigger zz_fee_history after insert or update of fee_amount on public.mem
 drop trigger if exists zz_category_history on public.members;
 create trigger zz_category_history after insert or update of category_id on public.members
   for each row execute function public.member_category_track();
+
+-- ---------------------------------------------------------------------
+-- Heure du serveur (version 2.2.4, audit B6) : les retards de cotisation sont calculés
+-- avec la date du serveur, même si le téléphone est mal réglé. Lecture seule.
+-- ---------------------------------------------------------------------
+create or replace function public.server_now() returns timestamptz
+language sql stable security invoker set search_path = public as $$
+  select now();
+$$;
+revoke all on function public.server_now() from public, anon;
+grant execute on function public.server_now() to authenticated;
+
+-- ---------------------------------------------------------------------
+-- Numéro de saisie (version 2.2.5, audit B7)
+-- ---------------------------------------------------------------------
+alter table public.transactions add column if not exists client_ref text
+  check (client_ref is null or client_ref ~ '^[A-Za-z0-9-]{16,64}(:[0-9]{1,2})?$');
+create unique index if not exists transactions_client_ref_uq
+  on public.transactions(association_id, client_ref) where client_ref is not null;
+
+alter table public.expense_requests add column if not exists client_ref text
+  check (client_ref is null or client_ref ~ '^[A-Za-z0-9-]{16,64}$');
+create unique index if not exists expense_requests_client_ref_uq
+  on public.expense_requests(association_id, client_ref) where client_ref is not null;
+
+-- ---------------------------------------------------------------------
+-- Page publique sans texte libre des dépenses (version 2.2.8)
+-- ---------------------------------------------------------------------
+-- v2.2.8 : la page publique d'un projet n'affiche plus le texte libre des dépenses
+-- (il pouvait contenir un nom de personne). Elle montre la catégorie (liste fixe), la date et le montant.
+create or replace function public.public_project(p_slug text) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select jsonb_build_object(
+    'association', jsonb_build_object('name', a.name, 'village', a.village, 'region', a.region,
+                                      'country', a.origin_country, 'city', a.residence_city, 'currency', a.currency),
+    'project', jsonb_build_object('name', p.name, 'type', p.type, 'description', p.description, 'goal', p.goal,
+                                  'status', p.status, 'start_on', p.start_on, 'end_on', p.end_on, 'contact', p.public_contact),
+    'collected', coalesce((select sum(amount) from transactions t where t.project_id = p.id and t.kind = 'in'), 0),
+    'spent', coalesce((select sum(amount) from transactions t where t.project_id = p.id and t.kind = 'out'), 0),
+    'gifts', (select count(*) from transactions t where t.project_id = p.id and t.kind = 'in' and t.reversal_of is null
+                and not exists (select 1 from transactions r where r.reversal_of = t.id)),
+    'updates', coalesce((select jsonb_agg(jsonb_build_object('body', u.body, 'at', u.created_at) order by u.created_at desc)
+                         from (select * from project_updates u where u.project_id = p.id order by created_at desc limit 20) u), '[]'::jsonb),
+    'expenses', coalesce((select jsonb_agg(jsonb_build_object('category', e.category, 'amount', e.amount, 'on', e.occurred_on) order by e.occurred_on desc)
+                         from (select * from transactions t where t.project_id = p.id and t.kind = 'out' and t.reversal_of is null
+                                 and not exists (select 1 from transactions r where r.reversal_of = t.id)
+                               order by occurred_on desc, id desc limit 30) e), '[]'::jsonb))
+  from projects p join associations a on a.id = p.association_id
+  where p.public_slug is not null and p.public_slug = lower(trim(p_slug));
+$$;
+revoke execute on function public.public_project(text) from public;
+grant execute on function public.public_project(text) to anon, authenticated;
+-- v2.2.9 : deux corrections trouvées par le test de résistance du 14/11/2026.
+--
+-- (1) Un mois déjà payé ne peut plus être encaissé une deuxième fois.
+--     Avant : une déclaration Wave confirmée après un encaissement à la main (ou deux trésoriers
+--     en même temps) comptait le même mois deux fois et gonflait la caisse.
+--     La base refuse maintenant toute nouvelle cotisation pour un mois déjà réglé
+--     (montant payé >= cotisation du membre pour ce mois), quelle que soit la façon de l'envoyer.
+-- (2) La limite de 50 membres de la formule Village ne se contourne plus en réintégrant
+--     un membre retiré ou en acceptant une demande d'adhésion par code.
+
+-- Cotisation d'un membre pour un mois : même calcul que feeOf() dans app.js
+-- (catégorie valable ce mois-là, puis montant valable ce mois-là pour cette catégorie).
+create or replace function public.fee_of(p_member uuid, p_period text) returns bigint
+language plpgsql stable security definer set search_path = public as $$
+declare m members; cid uuid; cat member_categories; cur_fee bigint; hist bigint;
+begin
+  select * into m from members where id = p_member;
+  if m.id is null then return 0; end if;
+  select h.category_id into cid from member_category_history h
+   where h.member_id = m.id and h.from_period <= p_period order by h.from_period desc limit 1;
+  if not found then cid := m.category_id; end if;
+  if cid is not null then select * into cat from member_categories where id = cid; end if;
+  if cat.id is not null then cur_fee := cat.fee_amount;
+  else select a.fee_amount into cur_fee from associations a where a.id = m.association_id; end if;
+  select f.fee_amount into hist from fee_history f
+   where f.association_id = m.association_id
+     and coalesce(f.category_id, '00000000-0000-0000-0000-000000000000'::uuid)
+         = coalesce(cat.id, '00000000-0000-0000-0000-000000000000'::uuid)
+     and f.from_period <= p_period
+   order by f.from_period desc limit 1;
+  return coalesce(hist, cur_fee, 0);
+end $$;
+revoke execute on function public.fee_of(uuid, text) from public, anon, authenticated;
+
+create or replace function public.tx_month_paid_check() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare fee bigint; paid bigint;
+begin
+  if new.category <> 'Cotisations' or new.kind <> 'in' or new.reversal_of is not null
+     or new.member_id is null or new.period is null then
+    return new;
+  end if;
+  -- Deux encaissements du même membre et du même mois passent l'un après l'autre.
+  perform pg_advisory_xact_lock(hashtext(new.member_id::text || '|' || new.period));
+  fee := fee_of(new.member_id, new.period);
+  if fee <= 0 then return new; end if;
+  select coalesce(sum(amount), 0) into paid from transactions
+   where member_id = new.member_id and period = new.period and category = 'Cotisations';
+  if paid >= fee then
+    raise exception '% est déjà payé pour ce membre. Choisissez un autre mois, ou refusez la déclaration si elle fait doublon.',
+      initcap(pfr(new.period)) using errcode = '23P01';
+  end if;
+  return new;
+end $$;
+revoke execute on function public.tx_month_paid_check() from public, anon, authenticated;
+drop trigger if exists tx_month_paid_check on public.transactions;
+create trigger tx_month_paid_check before insert on public.transactions
+  for each row execute function public.tx_month_paid_check();
+
+-- Le membre ne déclare pas un mois déjà payé.
+create or replace function public.declare_payment(p_member uuid, p_period text, p_amount bigint, p_method text, p_reference text)
+returns bigint language plpgsql security definer set search_path = public as $$
+declare m members; pn pay_numbers; dest text; cur text; nid bigint; ref text := trim(coalesce(p_reference, '')); fee bigint;
+begin
+  select * into m from members where id = p_member;
+  if m.id is null or m.user_id is distinct from auth.uid() or not m.active or m.pending then
+    raise exception 'Vous ne pouvez déclarer que votre propre paiement.';
+  end if;
+  if p_period !~ '^\d{4}-(0[1-9]|1[0-2])$' then raise exception 'Choisissez le mois concerné.'; end if;
+  if p_amount is null or p_amount <= 0 then raise exception 'Saisissez un montant supérieur à 0.'; end if;
+  if p_method not in ('Wave','Orange Money','Free Money') then raise exception 'Mode de paiement inconnu.'; end if;
+  if length(ref) > 60 then raise exception 'Référence trop longue.'; end if;
+  fee := fee_of(m.id, p_period);
+  if fee > 0 and (select coalesce(sum(amount), 0) from transactions
+                   where member_id = m.id and period = p_period and category = 'Cotisations') >= fee then
+    raise exception '% est déjà payé. Choisissez un autre mois.', initcap(pfr(p_period));
+  end if;
+  select * into pn from pay_numbers where association_id = m.association_id;
+  dest := case p_method when 'Wave' then pn.wave when 'Orange Money' then pn.orange else pn.free end;
+  if coalesce(dest, '') = '' then raise exception 'L''association n''a pas de numéro % pour recevoir les cotisations.', p_method; end if;
+  if exists (select 1 from payment_claims where member_id = m.id and period = p_period and status = 'pending') then
+    raise exception 'Un paiement pour % est déjà en attente de confirmation.', pfr(p_period);
+  end if;
+  insert into payment_claims(association_id, member_id, period, amount, method, sent_to, reference, created_by)
+  values (m.association_id, m.id, p_period, p_amount, p_method, dest || ' (' || pn.holder || ')', ref, auth.uid())
+  returning id into nid;
+  select currency into cur from associations where id = m.association_id;
+  perform write_log(m.association_id, format('a déclaré avoir payé %s par %s pour %s%s. À confirmer par le trésorier.',
+    fmt_money(p_amount, cur), p_method, pfr(p_period), case when ref <> '' then ' (réf. ' || ref || ')' else '' end));
+  return nid;
+end $$;
+
+-- (2) Limite de 50 membres actifs aussi à la réintégration et à l'acceptation d'une demande.
+--     Ne dépend pas de vl.system : review_join l'active.
+create or replace function public.members_plan_cap() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if not (new.active and not new.pending and (not old.active or old.pending)) then return new; end if;
+  if (select plan from associations where id = new.association_id) is distinct from 'association' then return new; end if;
+  if (select count(*) from members m where m.association_id = new.association_id
+        and m.active and not m.pending and m.id <> new.id) >= 50 then
+    raise exception 'La formule Village est limitée à 50 membres. Passez à la formule Diaspora (Plus → Abonnement).' using errcode = '42501';
+  end if;
+  return new;
+end $$;
+revoke execute on function public.members_plan_cap() from public, anon, authenticated;
+drop trigger if exists zz_plan_cap on public.members;
+create trigger zz_plan_cap before update on public.members
+  for each row execute function public.members_plan_cap();
+-- v2.2.10 : lecture rapide malgré des années d'historique (bug 4).
+--
+-- Problème : les règles de lecture appelaient is_member(association_id) pour CHAQUE ligne lue.
+-- Avec 38 000 opérations, une page de v_member_paid prenait environ 1 s, et loadCtx en charge
+-- des dizaines toutes les 15 secondes.
+--
+-- Correction : une seule question par requête. my_assoc_ids() renvoie, en une fois, la liste des
+-- associations où la personne connectée est membre actif et validé (même condition exacte que
+-- is_member : user_id = auth.uid(), active, not pending). Chaque règle compare ensuite
+-- association_id à cette liste. Écrit « (select my_assoc_ids()) », Postgres calcule la liste une
+-- seule fois au début de la requête (InitPlan) au lieu d'une fois par ligne.
+--
+-- Les droits ne changent pas :
+--   association_id = any(liste)  <=>  il existe une fiche (association_id, auth.uid(), active, not pending)
+--                                <=>  is_member(association_id)
+--   Sans connexion (auth.uid() nul) la liste est vide : aucune ligne, comme avant.
+--   Seules les règles de LECTURE (select) changent. Les règles d'écriture (has_role, with check)
+--   et les règles du stockage (fichiers) restent identiques.
+--   is_member et has_role restent en place : elles servent dans les fonctions et le stockage.
+--
+-- Index ajoutés pour les lectures de loadCtx et les suppressions en cascade (petites tables :
+-- création en quelques millisecondes ; voir le rapport pour la version CONCURRENTLY).
+-- Rejouable : create or replace, alter policy (change la règle en une seule étape, sans moment
+-- où la table resterait sans règle), create index if not exists.
+
+set lock_timeout = '5s';
+set statement_timeout = '60s';
+
+-- ---------------------------------------------------------------------
+-- 1. Les associations de la personne connectée, calculées une fois
+-- ---------------------------------------------------------------------
+create or replace function public.my_assoc_ids() returns uuid[]
+language sql stable security definer set search_path = public as $$
+  select coalesce(array_agg(m.association_id), '{}'::uuid[])
+  from members m
+  where m.user_id = auth.uid() and m.active and not m.pending;
+$$;
+revoke all on function public.my_assoc_ids() from public, anon;
+grant execute on function public.my_assoc_ids() to authenticated;
+
+-- Recherche par compte (my_assoc_ids, my_memberships, cast_vote...) : members_assoc_user_uniq
+-- commence par association_id et ne sert pas à chercher par user_id seul.
+create index if not exists members_user_idx on public.members(user_id) where user_id is not null;
+
+-- ---------------------------------------------------------------------
+-- 2. Règles de lecture : même condition, calculée une fois
+-- ---------------------------------------------------------------------
+alter policy assoc_select on public.associations
+  using (id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy members_select on public.members
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy tx_select on public.transactions
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy projects_select on public.projects
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy updates_select on public.project_updates
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy ann_select on public.announcements
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy log_select on public.activity_log
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy messages_select on public.messages
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy meetings_select on public.meetings
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy attendance_select on public.meeting_attendance
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy polls_select on public.polls
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy poll_options_select on public.poll_options
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+-- Bulletins : inchangé (on voit le sien ; ceux des autres seulement si le vote n'est pas secret).
+alter policy poll_votes_select on public.poll_votes
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]) and (
+    member_id in (select m.id from public.members m where m.user_id = (select auth.uid()))
+    or exists (select 1 from public.polls p where p.id = poll_id and not p.anonymous)));
+
+alter policy documents_select on public.documents
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy expense_requests_select on public.expense_requests
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy collections_select on public.collections
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy sections_select on public.sections
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy member_categories_select on public.member_categories
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy pay_numbers_select on public.pay_numbers
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy claims_select on public.payment_claims
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy exemptions_select on public.member_exemptions
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy subreq_select on public.subscription_requests
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]) or (select public.am_owner()));
+
+alter policy fee_history_select on public.fee_history
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+alter policy member_category_history_select on public.member_category_history
+  using (association_id = any ((select public.my_assoc_ids())::uuid[]));
+
+-- messages_insert (with check is_member) reste tel quel : il ne s'applique qu'à la ligne écrite.
+
+-- ---------------------------------------------------------------------
+-- 3. Index manquants (lectures filtrées par association, suppressions en cascade)
+-- ---------------------------------------------------------------------
+-- v_member_paid : lit seulement les cotisations d'une association, déjà dans l'ordre de l'app.
+create index if not exists tx_dues_idx on public.transactions(association_id, period, member_id)
+  include (amount) where category = 'Cotisations';
+create index if not exists updates_assoc_idx on public.project_updates(association_id);
+create index if not exists updates_project_idx on public.project_updates(project_id, created_at desc);
+create index if not exists ann_assoc_idx on public.announcements(association_id, created_at desc);
+create index if not exists poll_options_assoc_idx on public.poll_options(association_id);
+create index if not exists cat_history_assoc_idx on public.member_category_history(association_id);
+create index if not exists claims_member_idx on public.payment_claims(member_id, id desc);
+
+reset statement_timeout;
+reset lock_timeout;
+-- v2.2.11 : quatre corrections trouvées par la relecture de l'agent database-architect (14/11/2026).
+--
+-- (1) Une catégorie de cotisation déjà utilisée ne peut plus être supprimée : sa suppression
+--     effaçait son historique de montants et recalculait les mois déjà payés au tarif général.
+-- (2) La caisse ne peut plus passer sous zéro : toute sortie (dépense directe ou dépense approuvée)
+--     est refusée si elle dépasse le solde. Un verrou par association fait passer deux sorties
+--     simultanées l'une après l'autre. Les contre-écritures (corrections) restent permises.
+-- (3) Colonnes « système » de associations : cover_path et created_by ne changent plus que par les
+--     fonctions prévues ; une association suspendue ne se modifie plus.
+-- (4) Une association suspendue (ou en lecture seule) ne reçoit plus de messages, présences,
+--     sections, catégories, votes ni nouveaux numéros de paiement.
+-- (+) Limite de 50 membres comptée sous verrou et de la même façon partout (actifs et validés) ;
+--     anciennes contraintes « NOT VALID » validées (toutes les lignes existantes les respectent).
+
+set lock_timeout = '5s';
+set statement_timeout = '60s';
+
+-- ---------------------------------------------------------------------
+-- (1) Catégorie déjà utilisée : suppression refusée
+-- ---------------------------------------------------------------------
+create or replace function public.member_categories_in_use() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if coalesce(current_setting('vl.system', true), '') = 'on' then return old; end if;
+  -- Suppression de toute l'association (cascade) : l'association n'existe déjà plus, on laisse faire.
+  if not exists (select 1 from associations where id = old.association_id) then return old; end if;
+  if exists (select 1 from member_category_history where category_id = old.id) then
+    raise exception 'La catégorie « % » a déjà servi pour des cotisations : la supprimer changerait le montant des mois passés. Laissez-la sans membres à la place.', old.name
+      using errcode = '23503';
+  end if;
+  return old;
+end $$;
+revoke execute on function public.member_categories_in_use() from public, anon, authenticated;
+drop trigger if exists a_member_categories_in_use on public.member_categories;
+-- « a_ » : passe avant member_categories_release (les déclencheurs passent par ordre alphabétique).
+create trigger a_member_categories_in_use before delete on public.member_categories
+  for each row execute function public.member_categories_in_use();
+
+-- ---------------------------------------------------------------------
+-- (2) Caisse : jamais sous zéro
+-- ---------------------------------------------------------------------
+create or replace function public.tx_balance_check() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare bal bigint; cur text;
+begin
+  if new.kind <> 'out' or new.reversal_of is not null then return new; end if;
+  perform pg_advisory_xact_lock(hashtext('caisse|' || new.association_id::text));
+  select coalesce(sum(amount) filter (where kind = 'in'), 0) - coalesce(sum(amount) filter (where kind = 'out'), 0)
+    into bal from transactions where association_id = new.association_id;
+  if new.amount > bal then
+    select currency into cur from associations where id = new.association_id;
+    raise exception 'Solde insuffisant : la caisse contient %. Enregistrez d''abord les recettes.', fmt_money(bal, cur)
+      using errcode = '23514';
+  end if;
+  return new;
+end $$;
+revoke execute on function public.tx_balance_check() from public, anon, authenticated;
+drop trigger if exists tx_balance_check on public.transactions;
+create trigger tx_balance_check before insert on public.transactions
+  for each row execute function public.tx_balance_check();
+
+-- ---------------------------------------------------------------------
+-- (3) Colonnes système et association suspendue
+-- ---------------------------------------------------------------------
+create or replace function public.associations_guard() returns trigger
+language plpgsql set search_path = public as $$
+declare sys boolean := coalesce(current_setting('vl.system', true), '') = 'on';
+begin
+  -- Compte du créateur supprimé (clé étrangère « on delete set null ») : seul created_by passe à vide.
+  if new.created_by is null and old.created_by is not null
+     and (to_jsonb(new) - 'created_by') = (to_jsonb(old) - 'created_by') then
+    return new;
+  end if;
+  if new.invite_code <> old.invite_code and not sys then
+    raise exception 'Le code d''invitation se change avec la fonction prévue.';
+  end if;
+  if (new.plan <> old.plan or new.trial_ends is distinct from old.trial_ends or new.paid_until is distinct from old.paid_until
+      or new.blocked_at is distinct from old.blocked_at or new.blocked_reason is distinct from old.blocked_reason) and not sys then
+    raise exception 'L''offre se change par VillageLink.';
+  end if;
+  if (new.cover_path is distinct from old.cover_path or new.created_by is distinct from old.created_by) and not sys then
+    raise exception 'La photo de couverture et le créateur de l''association se changent avec les fonctions prévues.';
+  end if;
+  if old.blocked_at is not null and not sys then
+    raise exception 'Association suspendue par VillageLink : elle ne peut plus être modifiée. Écrivez à contact@villagelinkafrica.com.'
+      using errcode = '42501';
+  end if;
+  if new.currency <> old.currency and not sys
+     and (exists (select 1 from transactions where association_id = old.id)
+       or exists (select 1 from expense_requests where association_id = old.id)
+       or exists (select 1 from payment_claims where association_id = old.id)
+       or exists (select 1 from collections where association_id = old.id)
+       or exists (select 1 from projects where association_id = old.id)) then
+    raise exception 'La monnaie ne peut plus changer : l''association a déjà des montants enregistrés dans cette monnaie.';
+  end if;
+  return new;
+end $$;
+
+create or replace function public.set_cover(p_assoc uuid, p_path text) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not has_role(p_assoc, array['president','vice_president','secretaire']) then
+    raise exception 'Réservé au président, au vice-président et au secrétaire.';
+  end if;
+  if assoc_status(p_assoc) in ('blocked','readonly') then raise exception 'L''association est en lecture seule.'; end if;
+  if p_path is not null and (left(p_path, length(p_assoc::text) + 1) <> p_assoc::text || '/' or p_path like '%..%') then
+    raise exception 'Chemin de photo invalide.';
+  end if;
+  perform set_config('vl.system', 'on', true);
+  update associations set cover_path = p_path where id = p_assoc;
+  perform set_config('vl.system', 'off', true);
+end $$;
+
+-- ---------------------------------------------------------------------
+-- (4) Association suspendue ou en lecture seule : plus d'écriture
+-- ---------------------------------------------------------------------
+drop trigger if exists zz_subscription on public.messages;
+create trigger zz_subscription before insert on public.messages
+  for each row execute function public.enforce_subscription();
+drop trigger if exists zz_subscription on public.meeting_attendance;
+create trigger zz_subscription before insert on public.meeting_attendance
+  for each row execute function public.enforce_subscription();
+drop trigger if exists zz_subscription on public.sections;
+create trigger zz_subscription before insert on public.sections
+  for each row execute function public.enforce_subscription();
+drop trigger if exists zz_subscription on public.member_categories;
+create trigger zz_subscription before insert on public.member_categories
+  for each row execute function public.enforce_subscription();
+
+-- Message commun (mêmes textes que enforce_subscription).
+create or replace function public.assert_writable(p_assoc uuid) returns void
+language plpgsql stable security definer set search_path = public as $$
+declare st text := assoc_status(p_assoc); why text;
+begin
+  if st = 'blocked' then
+    select blocked_reason into why from associations where id = p_assoc;
+    raise exception 'Association suspendue par VillageLink : %. Écrivez à contact@villagelinkafrica.com.', coalesce(why, 'contactez VillageLink') using errcode = '42501';
+  elsif st = 'readonly' then
+    raise exception 'L’essai gratuit de VillageLink est terminé : l’association est en lecture seule. Le président peut activer l’abonnement dans Plus → Abonnement.' using errcode = '42501';
+  end if;
+end $$;
+revoke execute on function public.assert_writable(uuid) from public, anon, authenticated;
+
+create or replace function public.cast_vote(p_poll uuid, p_option uuid) returns void
+language plpgsql security definer set search_path = public as $$
+declare p polls; mid uuid;
+begin
+  select * into p from polls where id = p_poll;
+  if p.id is null or not is_member(p.association_id) then raise exception 'Vote introuvable.'; end if;
+  perform assert_writable(p.association_id);
+  if p.status <> 'Ouvert' or (p.closes_at is not null and p.closes_at <= now()) then raise exception 'Ce vote est clos.'; end if;
+  if not exists (select 1 from poll_options where id = p_option and poll_id = p_poll) then raise exception 'Choix inconnu.'; end if;
+  select id into mid from members where association_id = p.association_id and user_id = auth.uid() and active and not pending limit 1;
+  if mid is null then raise exception 'Seuls les membres validés peuvent voter.'; end if;
+  insert into poll_votes(poll_id, member_id, option_id, association_id) values (p_poll, mid, p_option, p.association_id)
+  on conflict (poll_id, member_id) do update set option_id = excluded.option_id, voted_at = now();
+end $$;
+
+create or replace function public.set_pay_numbers(p_assoc uuid, p_holder text, p_wave text, p_orange text, p_free text) returns void
+language plpgsql security definer set search_path = public as $$
+declare h text := trim(coalesce(p_holder, '')); w text := trim(coalesce(p_wave, '')); o text := trim(coalesce(p_orange, '')); f text := trim(coalesce(p_free, ''));
+begin
+  if not has_role(p_assoc, array['president','tresorier']) then
+    raise exception 'Seuls le président et le trésorier changent les numéros de paiement.';
+  end if;
+  perform assert_writable(p_assoc);
+  if (w <> '' or o <> '' or f <> '') and length(h) < 2 then
+    raise exception 'Indiquez le nom qui s''affiche chez Wave ou Orange Money pour ces numéros.';
+  end if;
+  insert into pay_numbers(association_id, holder, wave, orange, free, updated_by, updated_at)
+  values (p_assoc, h, w, o, f, auth.uid(), now())
+  on conflict (association_id) do update set holder = excluded.holder, wave = excluded.wave, orange = excluded.orange,
+    free = excluded.free, updated_by = excluded.updated_by, updated_at = now();
+  perform write_log(p_assoc, format('a changé les numéros de paiement mobile money : Wave %s, Orange Money %s, Free Money %s (au nom de %s).',
+    coalesce(nullif(w, ''), 'aucun'), coalesce(nullif(o, ''), 'aucun'), coalesce(nullif(f, ''), 'aucun'), coalesce(nullif(h, ''), '—')));
+end $$;
+
+-- ---------------------------------------------------------------------
+-- (+) Limite de 50 membres : sous verrou, même comptage partout (actifs et validés)
+-- ---------------------------------------------------------------------
+create or replace function public.enforce_plan_features() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare a associations;
+begin
+  if coalesce(current_setting('vl.system', true), '') = 'on' then return new; end if;
+  select * into a from associations where id = new.association_id;
+  if a.plan is distinct from 'association' then return new; end if;
+  if tg_table_name in ('sections', 'member_categories') then
+    raise exception 'Les sections et les catégories de cotisation sont réservées à la formule Diaspora (Plus → Abonnement).' using errcode = '42501';
+  end if;
+  if tg_table_name = 'members' then
+    perform pg_advisory_xact_lock(hashtext('cap|' || new.association_id::text));
+    if (select count(*) from members m where m.association_id = new.association_id and m.active and not m.pending) >= 50 then
+      raise exception 'La formule Village est limitée à 50 membres. Passez à la formule Diaspora (Plus → Abonnement).' using errcode = '42501';
+    end if;
+    return new;
+  end if;
+  if tg_table_name in ('transactions', 'expense_requests') then
+    if coalesce(new.orig_currency, '') not in ('', a.currency) then
+      raise exception 'Les paiements en plusieurs monnaies sont réservés à la formule Diaspora (Plus → Abonnement).' using errcode = '42501';
+    end if;
+  end if;
+  return new;
+end $$;
+
+create or replace function public.members_plan_cap() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if not (new.active and not new.pending and (not old.active or old.pending)) then return new; end if;
+  if (select plan from associations where id = new.association_id) is distinct from 'association' then return new; end if;
+  perform pg_advisory_xact_lock(hashtext('cap|' || new.association_id::text));
+  if (select count(*) from members m where m.association_id = new.association_id
+        and m.active and not m.pending and m.id <> new.id) >= 50 then
+    raise exception 'La formule Village est limitée à 50 membres. Passez à la formule Diaspora (Plus → Abonnement).' using errcode = '42501';
+  end if;
+  return new;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- (+) Anciennes contraintes validées (vérifié avant : toutes les lignes les respectent)
+-- ---------------------------------------------------------------------
+alter table public.associations validate constraint associations_len;
+alter table public.members validate constraint members_len;
+alter table public.projects validate constraint projects_len;
+alter table public.transactions validate constraint transactions_len;
+alter table public.transactions validate constraint transactions_kind_category;
+alter table public.transactions validate constraint transactions_fx;
+alter table public.expense_requests validate constraint expense_requests_fx;
+
+reset statement_timeout;
+reset lock_timeout;
+-- v2.2.12 : suppression de compte conforme à Google Play et au droit d'effacement.
+--
+-- Avant : seul le compte de connexion était effacé ; la fiche de membre gardait le nom, le
+-- téléphone et l'e-mail, et les messages restaient signés.
+-- Maintenant, à la suppression du compte :
+--   * chaque fiche de membre liée devient « Ancien membre » : nom remplacé, téléphone, e-mail,
+--     ville et pays effacés, rôle remis à « membre », fiche retirée (plus de cotisation due) ;
+--   * ses messages de discussion (texte et vocaux) sont supprimés. L'application efface d'abord
+--     les fichiers vocaux eux-mêmes (règle voice_delete_own ci-dessous) ;
+--   * restent, sans nom : montants, dates et modes de paiement (comptes de l'association),
+--     votes déjà comptés, présences, et le journal d'activité (ajout seul, transparence).
+
+set lock_timeout = '5s';
+set statement_timeout = '60s';
+
+create or replace function public.delete_my_account(p_confirm text) returns void
+language plpgsql security definer set search_path = public as $$
+declare uid uuid := auth.uid(); bad text;
+begin
+  if uid is null then raise exception 'Connectez-vous d''abord.'; end if;
+  if upper(trim(coalesce(p_confirm, ''))) <> 'SUPPRIMER' then raise exception 'Tapez SUPPRIMER pour confirmer.'; end if;
+  select string_agg(a.name, ', ') into bad
+  from members m join associations a on a.id = m.association_id
+  where m.user_id = uid and m.role = 'president' and m.active and not m.pending
+    and exists (select 1 from members o where o.association_id = m.association_id and o.id <> m.id and o.active and not o.pending)
+    and not exists (select 1 from members p where p.association_id = m.association_id and p.id <> m.id
+                      and p.role = 'president' and p.active and not p.pending and p.user_id is not null);
+  if bad is not null then
+    raise exception 'Vous êtes le seul président de « % ». Nommez un autre président avant de supprimer votre compte.', bad;
+  end if;
+  perform write_log(m.association_id, 'Un membre a supprimé son compte VillageLink. Sa fiche devient « Ancien membre » ; les montants restent dans les comptes.')
+  from members m where m.user_id = uid and m.active and not m.pending;
+  perform set_config('vl.system', 'on', true);
+  delete from members where user_id = uid and pending
+    and not exists (select 1 from transactions t where t.member_id = members.id)
+    and not exists (select 1 from payment_claims c where c.member_id = members.id);
+  update members set full_name = 'Ancien membre', phone = '', email = '', city = '', country = '',
+         role = 'membre', active = false
+   where user_id = uid;
+  delete from messages where author_id = uid;
+  delete from push_subscriptions where user_id = uid;
+  delete from auth.users where id = uid;
+  perform set_config('vl.system', '', true);
+end $$;
+revoke execute on function public.delete_my_account(text) from public, anon;
+grant execute on function public.delete_my_account(text) to authenticated;
+
+-- Chacun peut effacer les fichiers vocaux qu'il a lui-même envoyés (avant de supprimer son compte).
+drop policy if exists voice_delete_own on storage.objects;
+create policy voice_delete_own on storage.objects for delete to authenticated
+  using (bucket_id = 'voice' and owner_id = (select auth.uid())::text);
+
+reset statement_timeout;
+reset lock_timeout;
+
+-- v2.3.0 : abonnements par palier
+-- v2.3.0 : nouvelles formules d'abonnement (base seulement).
+-- Décisions d'Alpha (14-15/11/2026) : 3 formules selon la taille (petite 1-30, moyenne 31-100, grande 101-300),
+-- prix calculés par le serveur, essai de 30 jours pour les nouvelles associations, offre fondatrice (-50 % la
+-- 1re période de 12 mois payée, 10 associations), activation avec dates calculées par le serveur,
+-- une même référence de paiement ne peut pas être déclarée deux fois, une demande traitée ne change plus.
+-- Compatible avec l'app actuelle (v2.2.12) : mêmes fonctions, mêmes paramètres. Les limites de membres et de
+-- fonctions de l'ancienne formule Village sont retirées en 2.3.1, pas ici.
+
+-- 1. Essai de 30 jours pour les NOUVELLES associations (les dates existantes ne changent pas)
+alter table public.associations alter column trial_ends set default (current_date + 30);
+
+-- 2. Formules et offre fondatrice
+alter table public.associations drop constraint if exists associations_plan_check;
+alter table public.associations add constraint associations_plan_check
+  check (plan = any (array['decouverte','association','federation','petite','moyenne','grande']));
+alter table public.associations add column if not exists founder boolean not null default false;
+alter table public.associations add column if not exists founder_used boolean not null default false;
+
+-- 3. Demandes de paiement : formules, états, montant attendu, historique de période
+alter table public.subscription_requests drop constraint if exists subscription_requests_plan_check;
+alter table public.subscription_requests add constraint subscription_requests_plan_check
+  check (plan = any (array['association','federation','petite','moyenne','grande']));
+alter table public.subscription_requests drop constraint if exists subscription_requests_status_check;
+-- pending = déclaré ; verifying = en vérification ; confirmed = confirmé ; activated ; rejected
+alter table public.subscription_requests add constraint subscription_requests_status_check
+  check (status = any (array['pending','verifying','confirmed','activated','rejected']));
+alter table public.subscription_requests add column if not exists expected_amount bigint;
+alter table public.subscription_requests add column if not exists discounted boolean not null default false;
+alter table public.subscription_requests add column if not exists period_start date;
+alter table public.subscription_requests add column if not exists period_end date;
+alter table public.subscription_requests drop constraint if exists subscription_requests_expected_check;
+alter table public.subscription_requests add constraint subscription_requests_expected_check
+  check (expected_amount is null or expected_amount > 0);
+
+-- Une même référence ne peut pas être déclarée deux fois pour une association (sauf si la 1re a été refusée)
+create unique index if not exists subreq_ref_uniq on public.subscription_requests (association_id, lower(reference))
+  where reference <> '' and status <> 'rejected';
+
+-- Une demande activée ou refusée ne change plus et ne s'efface pas
+create or replace function public.subreq_final() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  if coalesce(current_setting('vl.system', true), '') = 'on' then
+    return case when tg_op = 'DELETE' then old else new end;
+  end if;
+  if tg_op = 'DELETE' then
+    if old.status in ('activated', 'rejected') then
+      raise exception 'Un paiement d''abonnement traité ne s''efface pas.';
+    end if;
+    return old;
+  end if;
+  if old.status in ('activated', 'rejected') then
+    -- compte du déclarant supprimé (clé étrangère « on delete set null ») : seul created_by passe à vide
+    if new.created_by is null and old.created_by is not null
+       and (to_jsonb(new) - 'created_by') = (to_jsonb(old) - 'created_by') then
+      return new;
+    end if;
+    raise exception 'Un paiement d''abonnement traité ne se modifie plus.';
+  end if;
+  return new;
+end $$;
+revoke execute on function public.subreq_final() from public, anon, authenticated;
+drop trigger if exists subreq_final on public.subscription_requests;
+create trigger subreq_final before update or delete on public.subscription_requests
+  for each row execute function public.subreq_final();
+
+-- 4. L'offre se change par VillageLink seulement (ajout : founder, founder_used)
+create or replace function public.associations_guard() returns trigger
+language plpgsql set search_path = public as $$
+declare sys boolean := coalesce(current_setting('vl.system', true), '') = 'on';
+begin
+  -- Compte du créateur supprimé (clé étrangère « on delete set null ») : seul created_by passe à vide.
+  if new.created_by is null and old.created_by is not null
+     and (to_jsonb(new) - 'created_by') = (to_jsonb(old) - 'created_by') then
+    return new;
+  end if;
+  if new.invite_code <> old.invite_code and not sys then
+    raise exception 'Le code d''invitation se change avec la fonction prévue.';
+  end if;
+  if (new.plan <> old.plan or new.trial_ends is distinct from old.trial_ends or new.paid_until is distinct from old.paid_until
+      or new.blocked_at is distinct from old.blocked_at or new.blocked_reason is distinct from old.blocked_reason
+      or new.founder is distinct from old.founder or new.founder_used is distinct from old.founder_used) and not sys then
+    raise exception 'L''offre se change par VillageLink.';
+  end if;
+  if (new.cover_path is distinct from old.cover_path or new.created_by is distinct from old.created_by) and not sys then
+    raise exception 'La photo de couverture et le créateur de l''association se changent avec les fonctions prévues.';
+  end if;
+  if old.blocked_at is not null and not sys then
+    raise exception 'Association suspendue par VillageLink : elle ne peut plus être modifiée. Écrivez à contact@villagelinkafrica.com.'
+      using errcode = '42501';
+  end if;
+  if new.currency <> old.currency and not sys
+     and (exists (select 1 from transactions where association_id = old.id)
+       or exists (select 1 from expense_requests where association_id = old.id)
+       or exists (select 1 from payment_claims where association_id = old.id)
+       or exists (select 1 from collections where association_id = old.id)
+       or exists (select 1 from projects where association_id = old.id)) then
+    raise exception 'La monnaie ne peut plus changer : l''association a déjà des montants enregistrés dans cette monnaie.';
+  end if;
+  return new;
+end $$;
+
+-- 5. Grille : un seul endroit pour les formules et les prix (FCFA)
+create or replace function public.tier_for(n int) returns text
+language sql immutable set search_path = public as $$
+  select case when n is null or n < 0 then null
+              when n <= 30 then 'petite' when n <= 100 then 'moyenne' when n <= 300 then 'grande'
+              else 'devis' end $$;
+
+create or replace function public.plan_price(p_plan text, p_months int, p_founder boolean default false) returns bigint
+language plpgsql immutable set search_path = public as $$
+declare base bigint;
+begin
+  base := case p_plan when 'petite' then 2000 when 'moyenne' then 5000 when 'grande' then 10000 end;
+  if base is null then raise exception 'Formule invalide.'; end if;
+  if p_months = 1 then return base;
+  elsif p_months = 12 then return case when p_founder then base * 5 else base * 10 end;  -- 10 mois payés ; moitié prix si fondatrice
+  else raise exception 'Durée invalide.'; end if;
+end $$;
+revoke execute on function public.tier_for(int) from public, anon;
+revoke execute on function public.plan_price(text, int, boolean) from public, anon;
+grant execute on function public.tier_for(int) to authenticated;
+grant execute on function public.plan_price(text, int, boolean) to authenticated;
+
+-- Devis calculé par le serveur : formule d'après le nombre de membres actifs et validés, prix, remise fondatrice
+create or replace function public.sub_quote(p_assoc uuid, p_months int) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare a associations; n int; t text; disc boolean;
+begin
+  if not (has_role(p_assoc, array['president','vice_president','tresorier']) or am_owner()) then
+    raise exception 'Seuls le président, le vice-président et le trésorier gèrent l’abonnement.';
+  end if;
+  if p_months not in (1, 12) then raise exception 'Durée invalide.'; end if;
+  select * into a from associations where id = p_assoc;
+  select count(*) into n from members m where m.association_id = p_assoc and m.active and not m.pending;
+  t := tier_for(n);
+  if t = 'devis' then
+    return jsonb_build_object('members', n, 'plan', 'devis', 'months', p_months, 'amount', null, 'discounted', false);
+  end if;
+  disc := coalesce(a.founder, false) and not coalesce(a.founder_used, false) and p_months = 12;
+  return jsonb_build_object('members', n, 'plan', t, 'months', p_months, 'amount', plan_price(t, p_months, disc), 'discounted', disc);
+end $$;
+revoke execute on function public.sub_quote(uuid, int) from public, anon;
+grant execute on function public.sub_quote(uuid, int) to authenticated;
+
+-- 6. Déclarer un paiement : le serveur choisit la formule et calcule le montant attendu
+create or replace function public.request_subscription(p_assoc uuid, p_plan text, p_months int, p_amount bigint, p_reference text)
+returns bigint language plpgsql security definer set search_path = public as $$
+declare nid bigint; ref text := trim(coalesce(p_reference, '')); q jsonb; t text;
+begin
+  if not has_role(p_assoc, array['president','vice_president','tresorier']) then
+    raise exception 'Seuls le président, le vice-président et le trésorier gèrent l’abonnement.';
+  end if;
+  if p_plan not in ('association','federation','petite','moyenne','grande') or p_months not in (1, 12)
+     or p_amount is null or p_amount <= 0 then
+    raise exception 'Formule invalide.';
+  end if;
+  if length(ref) > 60 then raise exception 'Référence trop longue.'; end if;
+  if exists (select 1 from subscription_requests where association_id = p_assoc and status in ('pending','verifying','confirmed')) then
+    raise exception 'Une demande est déjà en attente de validation par VillageLink.';
+  end if;
+  q := sub_quote(p_assoc, p_months);
+  t := q->>'plan';
+  if t = 'devis' then
+    raise exception 'Plus de 300 membres : écrivez à contact@villagelinkafrica.com pour un devis.';
+  end if;
+  begin
+    insert into subscription_requests(association_id, plan, months, amount, reference, created_label, expected_amount, discounted)
+    values (p_assoc, t, p_months, p_amount, ref, actor_label(p_assoc), (q->>'amount')::bigint, (q->>'discounted')::boolean)
+    returning id into nid;
+  exception when unique_violation then
+    raise exception 'Ce paiement est déjà déclaré (même référence).';
+  end;
+  perform write_log(p_assoc, format('a déclaré avoir payé l’abonnement VillageLink (formule %s, %s) : %s%s. En attente de validation.',
+    initcap(t), case p_months when 12 then '1 an' else '1 mois' end, fmt_money(p_amount, 'XOF'),
+    case when ref <> '' then ' (réf. ' || ref || ')' else '' end));
+  return nid;
+end $$;
+
+-- 7. Propriétaire de VillageLink : états de la demande, activation, refus, fondatrices
+create or replace function public.owner_set_request_status(p_request bigint, p_status text) returns void
+language plpgsql security definer set search_path = public as $$
+declare r subscription_requests;
+begin
+  if not exists (select 1 from app_admins where user_id = auth.uid()) then raise exception 'Réservé au propriétaire de VillageLink.'; end if;
+  if p_status not in ('verifying','confirmed') then raise exception 'État invalide.'; end if;
+  select * into r from subscription_requests where id = p_request for update;
+  if r.id is null or r.status not in ('pending','verifying') then raise exception 'Demande introuvable ou déjà traitée.'; end if;
+  if p_status = 'verifying' and r.status <> 'pending' then raise exception 'Cette demande est déjà en vérification.'; end if;
+  if p_status = 'confirmed' and r.expected_amount is not null and r.amount < r.expected_amount then
+    raise exception 'Montant insuffisant : % reçu, % attendu.', fmt_money(r.amount, 'XOF'), fmt_money(r.expected_amount, 'XOF');
+  end if;
+  update subscription_requests set status = p_status where id = r.id;
+end $$;
+
+-- p_until est gardé pour la compatibilité avec l'app actuelle : il est ignoré. La date de fin est calculée ici.
+create or replace function public.owner_activate(p_request bigint, p_until date default null) returns void
+language plpgsql security definer set search_path = public as $$
+declare r subscription_requests; a associations; st date; en date;
+begin
+  if not exists (select 1 from app_admins where user_id = auth.uid()) then raise exception 'Réservé au propriétaire de VillageLink.'; end if;
+  select * into r from subscription_requests where id = p_request for update;
+  if r.id is null or r.status not in ('pending','verifying','confirmed') then raise exception 'Demande introuvable ou déjà traitée.'; end if;
+  if r.expected_amount is not null and r.amount < r.expected_amount then
+    raise exception 'Montant insuffisant : % reçu, % attendu.', fmt_money(r.amount, 'XOF'), fmt_money(r.expected_amount, 'XOF');
+  end if;
+  select * into a from associations where id = r.association_id for update;
+  -- Début : le plus tardif entre la fin de l'abonnement actuel, la fin de l'essai et aujourd'hui
+  -- (renouveler avant la fin ne fait rien perdre ; payer après la fin repart d'aujourd'hui).
+  st := greatest(a.paid_until, a.trial_ends, current_date);
+  en := (st + make_interval(months => r.months))::date;
+  perform set_config('vl.system', 'on', true);
+  update associations set plan = r.plan, paid_until = en, founder_used = founder_used or r.discounted where id = r.association_id;
+  update subscription_requests set status = 'activated', decided_at = now(), period_start = st, period_end = en where id = r.id;
+  insert into activity_log(association_id, actor_id, actor_label, message)
+  values (r.association_id, null, 'VillageLink', format('a activé l’abonnement (formule %s) jusqu’au %s. Merci !',
+    initcap(case r.plan when 'association' then 'moyenne' when 'federation' then 'grande' else r.plan end), to_char(en, 'DD/MM/YYYY')));
+  perform set_config('vl.system', '', true);
+end $$;
+
+create or replace function public.owner_reject(p_request bigint, p_note text) returns void
+language plpgsql security definer set search_path = public as $$
+declare r subscription_requests; why text := trim(coalesce(p_note, ''));
+begin
+  if not exists (select 1 from app_admins where user_id = auth.uid()) then raise exception 'Réservé au propriétaire de VillageLink.'; end if;
+  select * into r from subscription_requests where id = p_request for update;
+  if r.id is null or r.status not in ('pending','verifying','confirmed') then raise exception 'Demande introuvable ou déjà traitée.'; end if;
+  if length(why) < 3 then raise exception 'Indiquez le motif.'; end if;
+  update subscription_requests set status = 'rejected', decided_at = now(), note = left(why, 200) where id = r.id;
+  insert into activity_log(association_id, actor_id, actor_label, message)
+  values (r.association_id, null, 'VillageLink', format('n’a pas pu valider le paiement de l’abonnement. Motif : %s', why));
+end $$;
+
+create or replace function public.owner_set_founder(p_assoc uuid, p_value boolean) returns void
+language plpgsql security definer set search_path = public as $$
+begin
+  if not exists (select 1 from app_admins where user_id = auth.uid()) then raise exception 'Réservé au propriétaire de VillageLink.'; end if;
+  if p_value is null then raise exception 'Valeur invalide.'; end if;
+  perform pg_advisory_xact_lock(hashtext('founders'));
+  if p_value and (select count(*) from associations where founder and id <> p_assoc) >= 10 then
+    raise exception 'Les 10 places d’association fondatrice sont prises.';
+  end if;
+  perform set_config('vl.system', 'on', true);
+  update associations set founder = p_value where id = p_assoc;
+  perform set_config('vl.system', '', true);
+end $$;
+
+create or replace function public.owner_subscriptions() returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if not exists (select 1 from app_admins where user_id = auth.uid()) then raise exception 'Réservé au propriétaire de VillageLink.'; end if;
+  return jsonb_build_object(
+    'requests', coalesce((select jsonb_agg(row_to_json(x) order by x.id) from (
+        select r.*, a.name as assoc_name from subscription_requests r join associations a on a.id = r.association_id
+        where r.status in ('pending','verifying','confirmed')) x), '[]'::jsonb),
+    'assocs', coalesce((select jsonb_agg(jsonb_build_object('id', a.id, 'name', a.name, 'plan', a.plan,
+        'trial_ends', a.trial_ends, 'paid_until', a.paid_until, 'status', assoc_status(a.id),
+        'blocked_reason', a.blocked_reason, 'founder', a.founder, 'founder_used', a.founder_used,
+        'members', (select count(*) from members m where m.association_id = a.id and m.active and not m.pending),
+        'tier', tier_for((select count(*)::int from members m where m.association_id = a.id and m.active and not m.pending)))
+        order by coalesce(a.paid_until, a.trial_ends)) from associations a), '[]'::jsonb));
+end $$;
+
+revoke execute on function public.owner_set_request_status(bigint, text) from public, anon;
+revoke execute on function public.owner_set_founder(uuid, boolean) from public, anon;
+revoke execute on function public.owner_activate(bigint, date) from public, anon;
+grant execute on function public.owner_set_request_status(bigint, text) to authenticated;
+grant execute on function public.owner_set_founder(uuid, boolean) to authenticated;
+grant execute on function public.owner_activate(bigint, date) to authenticated;
+
+-- v2.3.1 : fin des limites
+-- v2.3.1 : plus aucune limite de membres ni de fonctions.
+create or replace function public.enforce_plan_features() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  return new;
+end $$;
+create or replace function public.members_plan_cap() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  return new;
+end $$;

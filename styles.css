@@ -495,3 +495,22 @@ table.sheet.num td:not(:first-child),table.sheet.num th:not(:first-child){text-a
 .pay-member select{min-height:48px}
 summary{min-height:44px}
 .item .pill{font-size:13px}
+
+/* v2.2.4 (audit B8) : défauts trouvés par tests/ecrans.cjs avec de longs textes et des montants au milliard */
+.kv.num{grid-template-columns:fit-content(45%) minmax(0,1fr)}
+.kv.num dd{overflow-wrap:anywhere}
+.kv.num dt{overflow-wrap:normal;hyphens:auto}
+.card .between{flex-wrap:wrap;row-gap:4px}
+.timeline > div{min-width:0;overflow-wrap:anywhere}
+/* v2.2.6 : entrées / sorties du mois au milliard dans la carte de la caisse (se chevauchaient) */
+.hero .boxes b{white-space:normal}
+.hero .boxes b.sm{font-size:12px}
+.hero .boxes > div{min-width:0}
+/* v2.2.7 (audit A7) : onglets du bas en 16 px sur téléphone. Chaque onglet prend la largeur de son nom
+   (« Cotisations » ne tient pas dans un cinquième d'écran) ; même graisse pour l'onglet actif, pour que la barre ne bouge pas. */
+@media (max-width:899px){
+  .tabs-in{grid-template-columns:repeat(5,auto);justify-content:space-between;padding:6px 8px 8px}
+  .tab{font-size:16px;line-height:1.15}
+  .tab[aria-current="page"]{font-weight:600}
+}
+@media (max-width:359px){.tab .ic{width:46px} .tabs-in{padding:6px 2px 8px}}

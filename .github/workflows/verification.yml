@@ -1,0 +1,64 @@
+# VillageLink — vérification automatique avant chaque mise en ligne.
+# Se lance sur chaque demande de fusion et sur chaque envoi vers main.
+# Détail des contrôles : tests/verification.cjs
+name: Vérification
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verification:
+    # Version figée : Playwright 1.56 ne gère pas encore Ubuntu 26.04 (ubuntu-latest).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # historique complet : le contrôle des numéros ?v= compare avec main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Installer le navigateur de test
+        run: |
+          npm install --no-save --no-package-lock --prefix "$RUNNER_TEMP/pw" playwright@1.56.0
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Vérifier l'application
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+        run: node tests/verification.cjs
+
+  affichage:
+    # Test d'affichage à 360 px avec une fausse base (aucune vraie donnée). Les captures sont gardées 7 jours.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Installer le navigateur de test
+        run: |
+          npm install --no-save --no-package-lock --prefix "$RUNNER_TEMP/pw" playwright@1.56.0
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Tester l'affichage
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+        run: node tests/affichage.cjs
+      - name: Tester tous les écrans (longs noms, montants au milliard)
+        if: always()
+        env:
+          NODE_PATH: ${{ runner.temp }}/pw/node_modules
+        run: node tests/ecrans.cjs
+      - name: Garder les captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: captures-affichage
+          path: tests/captures/
+          retention-days: 7

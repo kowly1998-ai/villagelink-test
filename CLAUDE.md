@@ -10,7 +10,7 @@ transparentes, projets, annonces, réunions et discussion.
   Claude écrit, vérifie et met en ligne le code.
 - Répondre en français simple, sans jargon. À la fin de chaque changement, dire précisément
   quoi tester sur le téléphone.
-- Version actuelle : **2.0** (nouvelle interface « design v2 »).
+- Version actuelle : **2.3.1 (sur le site de test seulement ; la vraie base est encore en 2.2.12)** (design v2, suspension d'association, photo de couverture, nouvelle icône, export CSV, rapport annuel, feuille de présence, verrou par code).
 
 ## Stack
 
@@ -19,7 +19,7 @@ transparentes, projets, annonces, réunions et discussion.
   RLS, stockage de fichiers.
 - `supabase-js` **2.45.4** chargé depuis jsDelivr (version figée).
 - Hébergement : **GitHub Pages** depuis la branche `main`. Un push sur `main` = mise en ligne.
-- Police **Inter** (Google Fonts). Thème **clair par défaut**, sombre ou automatique au choix dans « Mon profil » (`data-theme` sur `<html>`, réglage `vl:theme`).
+- Police **Inter** hébergée dans `fonts/` (depuis v2.2.12, plus de Google Fonts ; licence OFL dans `fonts/OFL.txt`). Thème **clair par défaut**, sombre ou automatique au choix dans « Mon profil » (`data-theme` sur `<html>`, réglage `vl:theme`).
 
 ## Fichiers
 
@@ -27,12 +27,12 @@ transparentes, projets, annonces, réunions et discussion.
 |---|---|
 | `index.html` | Coquille de la page, politique de sécurité (CSP), chargement des scripts avec `?v=N` |
 | `config.js` | URL et clé publique (anon) Supabase. Jamais la clé `service_role` |
-| `app.js` | Toute l'application (environ 2 400 lignes) |
+| `app.js` | Toute l'application (environ 2 750 lignes) |
 | `styles.css` | Styles du design v2 : jetons (`--color-primary`…), composants, version ordinateur. **Une seule couleur de marque (#1B3A8C), aucun dégradé, aucun flou.** Les anciens noms de variables (`--accent`, `--muted`…) restent comme alias |
 | `manifest.webmanifest`, `icon*` | Installation sur l'écran d'accueil |
 | `sw.js` | Service worker du mode hors ligne (réseau d'abord, copie de secours) |
 | `confidentialite.html`, `conditions.html`, `legal.css` | Politique de confidentialité et conditions d'utilisation (exigées par Google et le Play Store) |
-| `supabase/schema.sql` | Structure complète de la base, à jour (vérifiée à la 2.0.2) : référence et secours |
+| `supabase/schema.sql` | Structure complète de la base, à jour (vérifiée le 12/11/2026, version 2.2.4 : 27 tables, 5 vues, 90 fonctions identiques à la base) : référence et secours |
 
 ## Organisation de `app.js`
 
@@ -41,6 +41,7 @@ Démarrage → Outils → Rôles et droits → Contexte d'une association → Ro
 Accueil sans association → Cadre d'une association → Écrans → Formulaires → Événements → Session.
 
 - **Routage par hash** : `#/`, `#/bienvenue`, `#/mot-de-passe`, `#/a/<id>/<écran>`.
+- **Liens courts** (partage WhatsApp, `shortLink`) : `#/r/<8 car.>` réunion, `#/v/<8 car.>` vote, `#/rapport/<8 car. de l'asso>?m=AAAA-MM`. `openShort` retrouve la ligne (la RLS filtre) puis ouvre l'adresse complète. Lien gardé pendant la connexion Google (`sessionStorage vl:next`).
 - **Écrans** : objet `V` (`home`, `membres`/`m`, `cotisations`, `encaisser`, `finances`,
   `operation`/`op`, `transparence`, `projets`/`p`, `annonces`, `reunions`/`r`, `discussion`,
   `journal`, `plus`, `parametres`). Code à lancer après l'affichage : `AFTER[écran]`.
@@ -55,16 +56,25 @@ Accueil sans association → Cadre d'une association → Écrans → Formulaires
 
 ## Données (Supabase, schéma `public`)
 
-- **Tables** : `associations`, `members`, `transactions`, `projects`, `project_updates`,
-  `announcements`, `meetings`, `meeting_attendance`, `polls`, `poll_options`, `poll_votes`,
-  `documents`, `messages`, `activity_log`.
+- **27 tables** (au 12/11/2026), par thème :
+  - association et membres : `associations`, `members`, `sections`, `member_categories`,
+    `member_category_history`, `member_exemptions`, `join_attempts` (essais de code d'invitation) ;
+  - argent : `transactions`, `fee_history` (montant de cotisation par mois de départ), `pay_numbers`
+    (numéros Wave / Orange / Free), `payment_claims` (paiements déclarés par les membres),
+    `expense_requests` (dépenses à valider), `collections` (solidarité, collectes) ;
+  - projets : `projects`, `project_updates` ;
+  - vie de l'association : `announcements`, `meetings`, `meeting_attendance`, `polls`, `poll_options`,
+    `poll_votes`, `documents`, `messages` ;
+  - système : `activity_log`, `push_subscriptions`, `subscription_requests`, `app_admins`.
 - **Vues** (toutes en `security_invoker = true`) : `v_balances`, `v_member_paid`,
-  `v_project_totals`, `v_category_totals`.
-- **Fonctions appelées par l'app** : `create_association`, `join_association`, `review_join`,
-  `regenerate_invite_code`, `my_memberships`, `reverse_transaction`, `hide_message`,
-  `create_poll`, `cast_vote`, `close_poll`, `poll_results` (votes : aucune écriture directe dans les tables).
-- **Stockage** : buckets privés `proofs` (justificatifs de paiement, 5 Mo maximum) et `docs`
-  (documents de l'association, 10 Mo maximum). Chemin : `<id association>/<fichier>`.
+  `v_project_totals`, `v_category_totals`, `v_collection_totals`.
+- **Fonctions** : 90 au 12/11/2026, liste complète dans `supabase/schema.sql`. Les plus utilisées par l'app :
+  `create_association`, `join_association`, `review_join`, `regenerate_invite_code`, `my_memberships`,
+  `member_contacts`, `reverse_transaction`, `declare_payment`, `confirm_payment_claim`, `hide_message`,
+  `create_poll`, `cast_vote`, `close_poll`, `poll_results`, `server_now` (heure du serveur pour les retards)
+  (votes : aucune écriture directe dans les tables).
+- **Stockage** : buckets privés `proofs` (justificatifs de paiement, 5 Mo maximum), `docs`
+  (documents de l'association, 10 Mo maximum), `voice` (messages vocaux, 3 Mo) et `covers` (photo de couverture, 2 Mo, réduite sur le téléphone avant l'envoi). Chemin : `<id association>/<fichier>`.
 - **Définition exacte** de chaque table, fonction et règle : `supabase/schema.sql`. Le lire avant
   de toucher à la base.
 
@@ -88,7 +98,7 @@ Rôles : `president`, `vice_president`, `secretaire`, `tresorier`, `projets`, `m
    `can()` dans `app.js` ne fait que cacher des boutons. Un changement de droit se fait dans la
    base **d'abord**, puis dans `CAN`.
 2. Toute nouvelle table : RLS activée et politiques limitées aux membres de l'association
-   (`is_member`, `has_role`).
+   (`has_role` pour écrire ; pour lire, `association_id = any ((select public.my_assoc_ids())::uuid[])`, calculé une fois par requête, depuis v2.2.10).
 3. Fonctions `security definer` : toujours `set search_path = public`, et vérifier l'appartenance
    ou le rôle à l'intérieur de la fonction.
 4. Toute nouvelle vue : `with (security_invoker = true)`.
@@ -107,12 +117,13 @@ Rôles : `president`, `vice_president`, `secretaire`, `tresorier`, `projets`, `m
    `apply_migration` (même nom, même contenu, ex. `v1_5_...`). La base d'abord, le code ensuite.
    Ajouter aussi le même SQL à la fin de `supabase/schema.sql`, qui doit rester la photo complète de la base.
 2. **Cache** : augmenter le numéro `?v=` dans `index.html` pour chaque fichier modifié
-   (aujourd'hui `styles.css?v=36`, `config.js?v=2`, `i18n-ff.js?v=1`, `receipt.js?v=3`, `app.js?v=45`). Sinon les téléphones gardent
+   (aujourd'hui `styles.css?v=44`, `config.js?v=2`, `i18n-ff.js?v=1`, `receipt.js?v=3`, `app.js?v=65`, `fonts/inter.css?v=1`, `projet.js?v=2` dans `projet.html`). Sinon les téléphones gardent
    l'ancienne version.
-3. **Vérification** : `node tests/verification.cjs` (avec Playwright) contrôle l'écriture du code, les fichiers appelés et leur `?v=`, les empreintes SRI, le lecteur de reçus et l'ouverture des pages à 360 px. GitHub Actions (`.github/workflows/verification.yml`) la lance sur chaque demande de fusion et chaque envoi vers `main` : ne pas fusionner si elle est rouge. Ajouter un contrôle quand une nouvelle fonction le mérite.
+3. **Vérification** : `node tests/verification.cjs` (avec Playwright, préparé au démarrage de chaque session cloud par `.claude/hooks/session-start.sh`, qui met aussi la branche à jour depuis `main` ou prévient si elle a du travail non fusionné) contrôle l'écriture du code, les fichiers appelés et leur `?v=` (rouge si un fichier a changé depuis `main` sans nouveau numéro), l'absence de clé secrète dans le dépôt, les empreintes SRI, le lecteur de reçus et l'ouverture des pages à 360 px. GitHub Actions (`.github/workflows/verification.yml`) la lance sur chaque demande de fusion et chaque envoi vers `main` : ne pas fusionner si elle est rouge. Ajouter un contrôle quand une nouvelle fonction le mérite.
 4. **Commit** sur `main`, en français : `Version X.Y : <ce qui change>`.
 5. **Push** : GitHub Pages met en ligne en quelques minutes.
 6. Dire à Alpha quoi tester sur son téléphone.
+7. **Site de test** : `test.villagelinkafrica.com` (dépôt `kowly1998-ai/villagelink-test`, base Supabase de test `phkiovzhlmozpdoiigpf`). Toute nouveauté y passe d'abord ; `tests/affichage.cjs` (GitHub Actions) l'ouvre à 360 px avec une fausse base, et `tests/ecrans.cjs` ouvre les 39 écrans (président en clair et en sombre, membre) avec de longs noms et des montants au milliard : rouge si une erreur apparaît ou si un texte dépasse de l'écran ou de sa carte (`CAPTURES=1` garde une capture de chaque écran). Ajouter à sa liste `PRES` tout nouvel écran.
 
 ## Conventions produit
 
@@ -141,9 +152,44 @@ Rôles : `president`, `vice_president`, `secretaire`, `tresorier`, `projets`, `m
 - v1.9 mode hors ligne (`sw.js`).
 - v1.10 bouton « Continuer avec Google » sur l'écran de connexion (masquable avec `google: false` dans `config.js`).
 - **Ensuite** : pilote réel avec Kansaghel, politique de confidentialité, page de présentation, Play Store.
+- v2.2 lot 2 : export CSV des membres et des opérations (Paramètres, `exportData`), rapport annuel (`V.rapportannuel`), feuille de présence à imprimer (`r/<id>/feuille`), verrou par code PIN sur le téléphone (`vl:pin`, PBKDF2, effacé à la déconnexion). Politique de sécurité : plus de `'unsafe-inline'` pour `style-src` (seulement `style-src-attr`). Aucune migration de base.
+- v2.2.3 (audit) : montants avec point/virgule refusés ; monnaie bloquée dès qu'il y a des montants (`associations_guard`) ; historique des cotisations (`fee_history`, `member_category_history`, `feeOf(m, période)`) ; paiement réparti sur plusieurs mois (`spread`) ; téléphone et e-mail des membres réservés au bureau (colonnes `phone`/`email` non lisibles, fonction `member_contacts`) : **toute nouvelle colonne de `members` doit être ajoutée au `grant select (...)`** ; on ne confirme pas son propre paiement déclaré ; `loadCtx` en parallèle ; verrou par code avec compteur d'essais gardé (`vl:pin:try`).
+- v2.2.4 (suite de l'audit) : B6, les retards de cotisation utilisent la date du serveur (`server_now`, écart gardé dans `clockSkew` si plus de 2 minutes) ; B9, documentation remise à jour ; B8, test d'affichage étendu.
+- v2.2.5 (audit B7) : numéro de saisie `client_ref` sur `transactions` et `expense_requests` (index unique par association). Les formulaires `pay` et `op` le reçoivent (`refField()`) ; un doublon refusé (`isDup`) s'affiche « déjà enregistré ». Un paiement réparti sur plusieurs mois envoie `<numéro>:1`, `:2`… **Tout nouveau formulaire qui crée de l'argent doit porter `refField()`.**
+- v2.2.6 (audit S9) : relecture des 44 fonctions à droits élevés, aucune faille. Alerte « Numéros de paiement changés » sur l'accueil du président et du vice-président quand quelqu'un d'autre modifie `pay_numbers` (60 jours, jusqu'à confirmation : `vl:paynum:<asso>`, action `paynum-ok`). Entrées / sorties du mois au milliard lisibles dans la carte de la caisse.
+- v2.2.7 (audit A7) : onglets du bas en 16 px sur téléphone, chaque onglet prend la largeur de son nom (`grid-template-columns:repeat(5,auto)`), même graisse pour l'onglet actif ; sur moins de 360 px, pastille d'icône à 46 px et marges réduites. Vérifié à 320 et 360 px.
+- v2.2.8 : la page publique d'un projet (`public_project`, `projet.js`) n'affiche plus le texte libre des dépenses, seulement catégorie (liste fixe), date et montant ; retiré côté base, pas seulement à l'écran. Les « nouvelles du chantier » restent publiques (le bureau est prévenu de ne pas y mettre de nom). **Tout nouveau champ ajouté à `public_project` devient visible par tout le monde.**
+- v2.2.9 (test de résistance du 14/11/2026) : un mois déjà payé ne peut plus être encaissé une 2e fois, quelle que soit la voie (trigger `tx_month_paid_check`, cotisation calculée par `fee_of(membre, mois)` = même calcul que `feeOf`) ; `declare_payment` refuse un mois déjà payé ; la carte d'une déclaration prévient si le mois est déjà payé. Limite de 50 membres de la formule Village aussi à la réintégration et à l'acceptation d'une demande (`members_plan_cap`). **Si `feeOf` change dans app.js, changer `fee_of` dans la base.** Association de démo sur la base de test : « Association de démo — Village de Sintiou » (comptes `<rôle>@demo.villagelink.test`).
+- v2.2.10 (bug 4, lenteur) : les 24 règles de lecture utilisent `my_assoc_ids()` (associations où l'on est membre actif et validé, calculée une fois par requête) au lieu de `is_member()` ligne par ligne, et 8 index ajoutés (dont `tx_dues_idx` pour `v_member_paid`). Testé sur la base de test : droits identiques (319 vérifications, 11 comptes × 29 tables et vues), 38 pages de `v_member_paid` en 0,8 s au lieu de 36 s pour 10 ans d'historique. `is_member` et `has_role` restent pour les écritures, les fonctions et le stockage. Retour arrière : remettre `using (is_member(association_id))` sur chaque règle. Préparé par l'agent database-architect.
+- v2.2.11 (relecture de l'agent database-architect) : une catégorie de cotisation déjà utilisée ne se supprime plus (`a_member_categories_in_use`, elle changerait les mois passés) ; **la caisse ne passe jamais sous zéro** (`tx_balance_check` sur toute sortie, verrou par association ; les contre-écritures restent permises) ; `cover_path` et `created_by` ne changent que par les fonctions prévues (`set_cover` passe en `vl.system`) et une association suspendue ne se modifie plus (`associations_guard`) ; association suspendue ou en lecture seule : plus de messages, présences, sections, catégories, votes ni numéros de paiement (`zz_subscription`, `assert_writable`) ; limite de 50 membres sous verrou et comptée pareil partout (actifs et validés) ; contraintes `NOT VALID` validées. Rappel : une association ne peut pas être supprimée (journal et opérations définitifs).
+- v2.2.12 (audit juridique) : suppression de compte anonymisée (`delete_my_account` : fiches → « Ancien membre », contacts effacés, fiche retirée, messages supprimés ; l'app efface d'abord les fichiers vocaux, règle de stockage `voice_delete_own`) ; police Inter hébergée sur VillageLink (CSP sans Google Fonts) ; politique de confidentialité, conditions et page de suppression réécrites (responsabilités association / VillageLink, téléphone et email réservés au bureau, transferts, durées, âge minimum **15 ans**, pages publiques, suspension et fermeture). **Toute nouvelle donnée personnelle doit être ajoutée à la politique et à la suppression de compte.** Reste à faire par Alpha : déclaration à la CDP, statut juridique, relecture par un juriste.
 - **Mis de côté** : paiement mobile directement dans l'app (agrégateurs type SasPay).
 - **Plus tard** : publication sur le Play Store.
 - La colonne `associations.plan` existe déjà pour de futures offres.
+
+## Compétence « supabase-postgres-best-practices »
+
+- `.claude/skills/supabase-postgres-best-practices/` (guide officiel Supabase, licence MIT, via davila7/claude-code-templates, copié tel quel le 14/11/2026) : 32 règles (index, RLS, blocages, connexions). À lire avant tout changement de base, avec l'agent database-architect.
+- A servi pour le **bug 4** (v2.2.10) : règle `security-rls-performance` (fonction appelée une fois au lieu de pour chaque ligne).
+- **Les règles de ce fichier passent avant les siennes** : on garde `set search_path = public` (règle de sécurité 3), les identifiants uuid, et pas de `FORCE ROW LEVEL SECURITY` sans test sur la base de test (les fonctions `security definer` en dépendent).
+
+## Agents « ux-researcher » et « legal-advisor »
+
+- `.claude/agents/ux-researcher.md` et `.claude/agents/legal-advisor.md` (davila7/claude-code-templates, licence MIT, copiés tels quels le 14/11/2026). Ils lisent, cherchent sur le web et rédigent ; ils ne touchent ni au code ni à la base.
+- **ux-researcher** : pilote avec Kansaghel (guides d'entretien, questionnaires courts à envoyer par WhatsApp, analyse des retours). Utilisateurs francophones, souvent peu à l'aise avec le numérique, sur téléphone d'entrée de gamme. Noms et numéros anonymisés dans les rapports.
+- **legal-advisor** : `confidentialite.html`, `conditions.html`, exigences du Play Store. Partir d'abord de la **loi sénégalaise n° 2008-12 sur les données personnelles (CDP)**, puis des pays où vivent les membres (Guinée, France/UE pour le RGPD…). Toujours un brouillon à faire relire, jamais un avis d'avocat.
+
+## Agents « product-strategist » et « customer-support »
+
+- `.claude/agents/product-strategist.md` et `.claude/agents/customer-support.md` (davila7/claude-code-templates, licence MIT, copiés tels quels le 14/11/2026). Ils lisent et rédigent (le premier cherche aussi sur le web) ; ils ne touchent ni au code ni à la base.
+- **product-strategist** : positionnement de VillageLink, offres et prix (formule Village limitée à 50 membres, formule Diaspora), plan de lancement après le pilote Kansaghel. Cibles : bureaux d'associations de ressortissants (Sénégal, Guinée, diaspora), décision souvent prise en assemblée, paiement par Wave / Orange Money. **Aucun chiffre de marché ou de prix inventé** : écrire « à sourcer » ou demander à Alpha.
+- **customer-support** : FAQ, guides de dépannage et réponses toutes prêtes à copier dans WhatsApp, en français très simple, pour des membres et trésoriers peu à l'aise avec le numérique. Vérifier dans `app.js` et ce fichier comment l'app marche avant d'écrire une réponse ; ne jamais promettre une fonction ou un délai. Suppression de compte, erreur d'argent, accès perdu ou soupçon de fraude : renvoyer vers Alpha (contact@villagelinkafrica.com). Aucun nom ni numéro de membre dans la FAQ.
+
+## Agent « database-architect »
+
+- `.claude/agents/database-architect.md` (davila7/claude-code-templates, licence MIT, copié tel quel le 14/11/2026) : à utiliser pour tout changement ou relecture de la base.
+- **Les règles de ce fichier passent avant les siennes** (identifiants uuid, triggers `*_check` pour l'appartenance à l'association, nommage des migrations, ajout à `schema.sql`).
+- Ses tests (« Prove it ») se font sur la **base de test** `phkiovzhlmozpdoiigpf`, jamais sur la vraie base `ncghmfwfnzgdddnqgnnl`. Il ne fait que proposer et tester ; la mise en ligne suit « Mettre en ligne un changement ».
 
 ## Points d'attention connus
 
