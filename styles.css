@@ -522,3 +522,11 @@ summary{min-height:44px}
 .names li:last-child{border-bottom:0}
 .print-only{display:none}
 @media print{.print-only{display:block}.names.cols{display:block;columns:3;column-gap:16px;font-size:11px}.names.cols li{padding:1px 0;border:0;break-inside:avoid}}
+
+/* Abonnement : une carte par formule */
+.pcards{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
+.pcard{min-width:0;display:flex;flex-direction:column;gap:8px;padding:16px;border-radius:var(--radius-lg);background:var(--color-surface);border:1.5px solid var(--color-border-strong)}
+.pcard.own{border:2px solid var(--color-primary);background:var(--color-primary-soft)}
+.pcard .pname{font-size:20px}.pcard .pprice{font-size:26px;font-weight:700;line-height:1.2}.pcard .pprice .muted{font-size:16px;font-weight:400}
+.pcard .row2{margin-top:4px}.pcard .btn[disabled]{cursor:not-allowed;opacity:.6}
+@media (min-width:900px){.pcards{grid-template-columns:repeat(3,minmax(0,1fr))}}

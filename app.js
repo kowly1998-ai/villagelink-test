@@ -1101,15 +1101,29 @@
       : '<span class="pill p-red">Lecture seule</span><h2>L’essai est terminé</h2><span class="muted">Tout reste consultable. L’abonnement rouvre l’enregistrement des paiements, membres, réunions…</span>';
     const ST = { pending: ['p-late', 'En attente de VillageLink'], verifying: ['p-late', 'VillageLink vérifie'], confirmed: ['p-ok', 'Confirmé : activation en cours'], activated: ['p-ok', 'Activé'], rejected: ['p-red', 'Refusé'] };
     const hist = reqs.length ? `<section class="stack"><h2>Paiements d’abonnement</h2><div class="list">${reqs.map(r => `<div class="item" style="align-items:flex-start"><div class="body"><div class="t num" style="white-space:normal">${money(r.amount, 'XOF')} · formule ${esc((PLANS[r.plan] || {}).label || r.plan)} · ${r.months === 12 ? '1 an' : '1 mois'}</div><div class="s wrap">${dFR(localDay(r.created_at))} · ${esc(r.created_label)}${r.reference ? ' · réf. ' + esc(r.reference) : ''}${r.note ? '<br>Motif : ' + esc(r.note) : ''}</div></div><span class="pill ${ST[r.status][0]}">${ST[r.status][1]}</span></div>`).join('')}</div></section>` : '';
-    const tierLine = t => `<div class="between" style="gap:8px${q12 && q12.plan === t.k ? ';font-weight:700' : ''}"><span>${t.label} · ${t.k === 'petite' ? '1 à ' : (TIERS[TIERS.indexOf(t) - 1].max + 1) + ' à '}${t.max} membres${q12 && q12.plan === t.k ? ' (la vôtre)' : ''}</span><span class="num">${money(t.month, 'XOF')} / mois · ${money(t.year, 'XOF')} / an</span></div>`;
-    const grid = `<section class="card stack"><b>Les formules</b>${TIERS.map(tierLine).join('')}<span class="muted" style="font-size:14px">Plus de 300 membres : sur devis. Toutes les fonctions sont incluses, quelle que soit la formule. Un an = 10 mois payés (2 mois offerts). La formule suit le nombre de membres au moment du renouvellement.</span></section>`;
-    const mine = q12 && q12.plan !== 'devis' ? `<section class="card stack"><span class="muted">Votre association compte</span><h2 style="margin:0">${num(n)} membre${n > 1 ? 's' : ''} actif${n > 1 ? 's' : ''}</h2><span>Formule <b>${esc((PLANS[q12.plan] || {}).label || q12.plan)}</b>${q12.discounted ? ' · <span class="pill p-ok">Tarif fondatrice −50 %</span>' : ''}</span></section>` : '';
+    // Une carte par formule, chacune avec ses boutons. Seule celle que le serveur applique est active : les autres sont grisées avec la raison.
+    const canPay = st !== 'blocked' && !IS_TWA && !pend && q12 && q12.plan !== 'devis';
+    const tierCard = (t, i) => {
+      const own = !!q12 && q12.plan === t.k, from = i === 0 ? 1 : TIERS[i - 1].max + 1;
+      const y = own ? q12.amount : t.year, mo = own && q1 ? q1.amount : t.month;
+      const why = own ? '' : `<span class="muted" style="font-size:14px">Pas pour vous : avec ${num(n)} membre${n > 1 ? 's' : ''}, c’est la formule ${esc(((PLANS[(q12 || {}).plan]) || {}).label || 'sur devis')} qui s’applique.</span>`;
+      const dis = own && canPay ? '' : ' disabled';
+      return `<section class="pcard${own ? ' own' : ''}"><div class="between"><b class="pname">${t.label}</b>${own ? '<span class="pill p-ok">Votre formule</span>' : ''}</div>
+        <span class="muted">${from} à ${t.max} membres</span>
+        <div class="pprice"><span class="num">${money(y, 'XOF')}</span><span class="muted"> / an</span></div>
+        ${own && q12.discounted ? `<span class="pill p-ok" style="align-self:flex-start">Tarif fondatrice −50 %</span><span class="muted" style="font-size:14px">Au lieu de ${money(t.year, 'XOF')} par an</span>` : ''}
+        <span class="muted">ou ${money(mo, 'XOF')} par mois · 2 mois offerts à l’année</span>
+        ${own ? '' : why}
+        <div class="row2"><button type="button" class="btn ${own ? 'primary' : 'ghost'}" data-act="sub-pick" data-m="12"${dis}>Payer 1 an</button><button type="button" class="btn ghost" data-act="sub-pick" data-m="1"${dis}>Payer 1 mois</button></div></section>`;
+    };
+    const grid = `${q12 ? `<p class="help" style="margin:0">Votre association compte <b>${num(n)} membre${n > 1 ? 's' : ''} actif${n > 1 ? 's' : ''}</b>. La formule suit ce nombre au moment du renouvellement.</p>` : ''}<div class="pcards">${TIERS.map(tierCard).join('')}</div><p class="help" style="margin:0">Plus de 300 membres : sur devis. Toutes les fonctions sont incluses, quelle que soit la formule.</p>`;
+    const mine = '';
     const pay = st === 'blocked' ? '<p class="note" style="margin:0">L’abonnement ne peut pas être payé tant que l’association est suspendue. Contactez VillageLink : contact@villagelinkafrica.com</p>'
       : IS_TWA ? '<p class="note" style="margin:0">L’abonnement se gère depuis le site de VillageLink. Contactez-nous : contact@villagelinkafrica.com</p>'
       : !q12 ? '<p class="note" style="margin:0">Impossible de calculer le prix pour le moment. Réessayez dans un instant.</p>'
       : q12.plan === 'devis' ? `<p class="note" style="margin:0">Avec ${num(n)} membres, le tarif est sur devis. Écrivez à contact@villagelinkafrica.com : rien n’est bloqué en attendant.</p>`
       : pend ? `<p class="note" style="margin:0">Votre paiement de ${money(pend.amount, 'XOF')} est en attente : VillageLink l’active dès qu’il l’a reçu, en général dans la journée.</p>`
-      : `<form class="stack" data-form="subreq" novalidate>
+      : `<form class="stack" data-form="subreq" id="sub-form" hidden novalidate>
         <input type="hidden" name="plan" value="${q12 ? q12.plan : ''}">
         <div class="radios" role="radiogroup" aria-label="Durée"><label><input type="radio" name="months" value="12" data-amt="${q12 ? q12.amount : 0}" checked>1 an${q12 && q12.discounted ? ' (tarif fondatrice)' : ''}</label><label><input type="radio" name="months" value="1" data-amt="${q1 ? q1.amount : 0}">1 mois</label></div>
         <section class="card stack"><div class="between"><span class="muted">Montant à payer</span><b class="num" id="sub-amt" style="font-size:22px"></b></div>
@@ -1118,7 +1132,7 @@
         <div class="field"><label for="sub-r">Référence du paiement Wave (ID de transaction)</label><input id="sub-r" name="reference" maxlength="60" autocapitalize="characters" placeholder="T_…"></div>
         <p class="err" hidden></p><button class="btn primary block" type="submit">J’ai payé</button>
         <p class="help">VillageLink vérifie le paiement et active l’abonnement, en général dans la journée. Rien n’est supprimé pendant ce temps.</p></form>`;
-    return `${head}<section class="card stack">${state}</section>${mine}${pay}${grid}
+    return `${head}<section class="card stack">${state}</section>${grid}${pay}
       <p class="help">Questions : contact@villagelinkafrica.com</p>${hist}`;
   };
   AFTER.abonnement = () => {
@@ -2640,6 +2654,11 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       else if (act === 'own-rej') { const f = document.getElementById('orj-' + b.dataset.id); if (f) f.hidden = false; }
       else if (act === 'own-block') { const f = document.getElementById('obk-' + b.dataset.id); if (f) f.hidden = false; }
       else if (act === 'own-unblock') { must(await sb.rpc('owner_unblock', { p_assoc: b.dataset.id })); toast('Association débloquée'); renderAdmin(); }
+      else if (act === 'sub-pick') {
+        const f = $('#sub-form'); if (!f) return;
+        const r = f.querySelector(`input[name=months][value="${b.dataset.m}"]`); if (r) { r.checked = true; f.dispatchEvent(new Event('change', { bubbles: true })); }
+        f.hidden = false; f.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
       else if (act === 'own-trial') { must(await sb.rpc('owner_set_dates', { p_assoc: b.dataset.id, p_trial_ends: plusDays([b.dataset.te, todayISO()].sort().pop(), 30), p_paid_until: b.dataset.pu || null })); toast('Essai prolongé de 30 jours'); renderAdmin(); }
       else if (act === 'theme') { store.set('vl:theme', b.dataset.theme); applyTheme(); route(); }
       else if (act === 'lang') { store.set('vl:lang', b.dataset.lang); if (b.dataset.lang === 'fr' && langNow() === 'fr') { location.reload(); return; } applyLang(); route(); }
