@@ -433,7 +433,9 @@
     const r = await sb.rpc('owner_stats');
     if (r.error) { root.innerHTML = `<div class="auth"><section class="card stack"><h2>Accès réservé</h2><p class="muted" style="margin:0">Ce tableau de bord est réservé au propriétaire de VillageLink.</p><a class="btn primary" href="#/bienvenue">Mes associations</a></section></div>`; return; }
     const d = r.data, N = n => num(n), pc = (a, b) => (b ? Math.round(a / b * 100) : 0);
-    const subs = await sb.rpc('owner_subscriptions').then(x => x.error ? null : x.data, () => null);
+    const [subs, ins] = await Promise.all([
+      sb.rpc('owner_subscriptions').then(x => x.error ? null : x.data, () => null),
+      sb.rpc('owner_insights').then(x => x.error ? null : x.data, () => null)]);
     const SUBST = { trial: ['p-blue', 'Essai'], active: ['p-ok', 'Abonnée'], grace: ['p-late', 'Grâce'], readonly: ['p-red', 'Lecture seule'], blocked: ['p-red', 'Bloquée'] };
     const untilFor = q => { const base = [(subs.assocs.find(x => x.id === q.association_id) || {}).paid_until, todayISO()].filter(Boolean).sort().pop(); const dd = new Date(base + 'T12:00:00Z'); dd.setUTCMonth(dd.getUTCMonth() + q.months); return dd.toISOString().slice(0, 10); };
     const subsHtml = sd => `<section class="card stack"><h2>Abonnements</h2>
@@ -441,6 +443,70 @@
           <div class="row" style="flex-wrap:wrap"><button class="btn primary sm" data-act="own-act" data-id="${q.id}" data-until="${untilFor(q)}">Activer jusqu’au ${dFR(untilFor(q))}</button><button class="btn ghost sm" data-act="own-rej" data-id="${q.id}">Refuser</button></div>
           <form class="stack" data-form="ownreject" data-id="${q.id}" id="orj-${q.id}" hidden novalidate><input name="note" placeholder="Motif (ex. rien reçu sur Wave)"><p class="err" hidden></p><button class="btn danger sm" type="submit">Refuser ce paiement</button></form></div>`).join('') : '<span class="muted">Aucun paiement à valider.</span>'}
         <div class="list">${sd.assocs.map(x => { const [c, l] = SUBST[x.status] || ['p-blue', x.status]; return `<div class="item"><div class="body"><div class="t">${esc(x.name)}</div><div class="s wrap num">${N(x.members)} membre${x.members > 1 ? 's' : ''} · ${x.paid_until ? 'payé jusqu’au ' + dFR(x.paid_until) : 'essai jusqu’au ' + dFR(x.trial_ends)}</div><button class="btn ghost sm" style="margin-top:6px" data-act="own-trial" data-id="${x.id}" data-te="${x.trial_ends}" data-pu="${x.paid_until || ''}">+30 jours d’essai</button> ${x.status === 'blocked' ? `<button class="btn primary sm" style="margin-top:6px" data-act="own-unblock" data-id="${x.id}">Débloquer</button><div class="s wrap">Motif : ${esc(x.blocked_reason || '')}</div>` : `<button class="btn ghost sm" style="margin-top:6px" data-act="own-block" data-id="${x.id}">Bloquer</button><form class="stack" data-form="ownblock" data-id="${x.id}" id="obk-${x.id}" hidden novalidate><input name="note" placeholder="Motif (ex. abonnement non payé)"><p class="err" hidden></p><button class="btn danger sm" type="submit">Bloquer cette association</button></form>`}</div><span class="pill ${c}">${l}</span></div>`; }).join('')}</div></section>`;
+    const insightsHtml = x => {
+      const m = x.money || {}, u = x.usage || {}, al = x.alerts || {}, wh = x.where || {}, h = x.health || {};
+      const st = m.status || {}, fcfa = v => money(v || 0, 'XOF');
+      // 12 barres : une étiquette sur trois (et la dernière) pour que tout tienne sur un petit écran
+      const bars = (rows, val, lab, aria, showN) => { const mx = Math.max(1, ...rows.map(val)); return `<div class="wkbars" role="img" aria-label="${aria}">${rows.map((r, i) => `<div class="wk"><span class="n num">${showN && val(r) ? N(val(r)) : ''}</span><i style="height:${Math.max(4, Math.round(val(r) / mx * 100))}%"></i><small>${i % 3 === 0 || i === rows.length - 1 ? lab(r) : NB}</small></div>`).join('')}</div>`; };
+      const mo = k => MOIS[Number(k.slice(5, 7)) - 1].replace('.', ''), wd = w => { const t = new Date(w + 'T12:00:00'); return t.getDate() + '/' + (t.getMonth() + 1); };
+      const mb = b => (b / 1048576).toLocaleString('fr-FR', { maximumFractionDigits: 1 }) + NB + 'Mo';
+      const gauge = (used, lim, lab) => { const p = Math.min(100, Math.round(used / lim * 100)); return `<div class="stack" style="gap:4px"><div class="between num"><span>${lab}</span><b>${mb(used)} sur ${mb(lim)} (${p}${NB}%)</b></div><div class="bar"><i style="width:${Math.max(1, p)}%"></i></div>${p >= 80 ? '<p class="err" style="margin:0">Bientôt plein : passez à l’offre payante de Supabase.</p>' : ''}</div>`; };
+      const TIER = { petite: 'petite (1 à 30)', moyenne: 'moyenne (31 à 100)', grande: 'grande (101 à 300)' };
+      const rowsOf = (list, f) => list.length ? `<div class="list">${list.map(f).join('')}</div>` : '';
+      const line = (t, s2, pill) => `<div class="item"><div class="body"><div class="t">${t}</div>${s2 ? `<div class="s wrap num">${s2}</div>` : ''}</div>${pill || ''}</div>`;
+      const nAl = (al.no_treasurer || []).length + (al.stuck_expenses || []).length + (al.near_tier || []).length + (al.unpaid || []).length;
+      const relance = t => `Bonjour ${t.president || ''}, c’est Alpha de VillageLink. L’essai gratuit de « ${t.name} » se termine le ${dFR(t.trial_ends)}. Pour continuer sans rien perdre, choisissez votre formule dans Mon profil → Abonnement. Je reste disponible si vous avez une question.`;
+      const kv = (list) => (list || []).map(r => `<div class="between num"><span>${esc(CUR_LABEL[r.k] && CUR_LABEL[r.k] !== r.k ? r.k + ' (' + CUR_LABEL[r.k] + ')' : r.k)}</span><b>${N(r.n)}</b></div>`).join('');
+      const pl = (n, w) => N(n) + NB + w + (n > 1 ? 's' : '');
+      const best = (m.monthly || []).reduce((t, r) => (r.amount > t.amount ? r : t), { amount: 0 });
+      return `<section class="card stack"><h2>L’argent qui vous revient</h2>
+        <div class="stack" style="gap:8px">
+          <div class="between num wrap"><span>Encaissé ce mois-ci</span><b>${fcfa(m.month)}</b></div>
+          <div class="between num wrap"><span>Revenu régulier par mois</span><b>${fcfa(m.mrr)}</b></div>
+          <div class="between num wrap"><span>Sur 12 mois</span><b>${fcfa(m.year)}</b></div>
+          <div class="between num wrap"><span>Depuis le début</span><b>${fcfa(m.total)}</b></div>
+          <div class="between num wrap"><span>Essais devenus payants</span><b>${m.trials_done ? pc(m.converted, m.trials_done) + NB + '% (' + N(m.converted) + ' sur ' + N(m.trials_done) + ')' : 'aucun essai terminé'}</b></div>
+        </div>
+        <div class="row" style="flex-wrap:wrap;gap:8px">${[['active', 'p-ok', 'Abonnées'], ['trial', 'p-blue', 'En essai'], ['grace', 'p-late', 'En retard'], ['readonly', 'p-red', 'Lecture seule'], ['blocked', 'p-red', 'Bloquées']].map(([k, c, l]) => `<span class="pill ${c}">${l} : ${N(st[k] || 0)}</span>`).join('')}</div>
+        ${(m.monthly || []).some(r => r.amount) ? bars(m.monthly, r => r.amount, r => mo(r.month), 'Revenus des abonnements par mois sur 12 mois') + `<p class="help num" style="margin:0">Meilleur mois : ${mo(best.month)} ${best.month.slice(0, 4)}, ${fcfa(best.amount)}.</p>` : '<p class="help" style="margin:0">Aucun abonnement payé pour l’instant : le graphique des revenus apparaîtra au premier paiement.</p>'}
+        <h3>Essais qui finissent dans 7 jours</h3>
+        ${rowsOf(m.trials_ending || [], t => `<div class="item"><div class="body"><div class="t">${esc(t.name)}</div><div class="s wrap num">${t.days ? 'dans ' + pl(t.days, 'jour') : 'aujourd’hui'} · ${dFR(t.trial_ends)} · ${pl(t.members, 'membre')}${t.president ? ' · président : ' + esc(t.president) : ''}</div>${t.phone ? `<a class="btn primary sm" style="margin-top:6px" target="_blank" rel="noopener" href="${esc(waTo(t.phone, relance(t)))}">Relancer sur WhatsApp</a>` : '<div class="s">Numéro du président non renseigné</div>'}</div></div>`) || '<span class="muted">Aucun essai ne finit cette semaine.</span>'}
+      </section>
+      <section class="card stack"><h2>Alertes${nAl ? ` <span class="pill p-red">${N(nAl)}</span>` : ''}</h2>
+        ${nAl ? '' : '<span class="muted">Rien à signaler.</span>'}
+        ${(al.no_treasurer || []).length ? `<h3>Sans trésorier</h3>${rowsOf(al.no_treasurer, a => line(esc(a.name), pl(a.members, 'membre') + ' · personne ne peut enregistrer les dépenses', ''))}` : ''}
+        ${(al.stuck_expenses || []).length ? `<h3>Dépenses bloquées depuis plus de 7 jours</h3>${rowsOf(al.stuck_expenses, e => line(esc(e.assoc), money(e.amount, e.currency) + ' · ' + esc(e.category || '') + ' · en attente depuis ' + N(e.days) + ' jours', ''))}` : ''}
+        ${(al.unpaid || []).length ? `<h3>Essai fini sans paiement</h3>${rowsOf(al.unpaid, a => line(esc(a.name), pl(a.members, 'membre'), `<span class="pill ${a.status === 'grace' ? 'p-late' : 'p-red'}">${a.status === 'grace' ? 'En retard' : 'Lecture seule'}</span>`))}` : ''}
+        ${(al.near_tier || []).length ? `<h3>Proche de la taille supérieure</h3>${rowsOf(al.near_tier, a => line(esc(a.name), N(a.members) + ' membres sur ' + N(a.limit) + ' · taille ' + (TIER[a.tier] || a.tier), ''))}` : ''}
+      </section>
+      <section class="card stack"><h2>L’usage réel</h2>
+        <h3>Fonctions utilisées en 30 jours</h3>
+        <div class="list">${(u.features || []).slice().sort((p, q) => q.rows - p.rows).map(f => line(esc(f.k), N(f.rows) + ' fois · ' + N(f.assocs) + ' association' + (f.assocs > 1 ? 's' : ''), f.rows ? '' : '<span class="pill p-late">Jamais utilisé</span>')).join('')}</div>
+        <h3>Associations endormies (rien depuis 14 jours)</h3>
+        ${rowsOf(u.dormant || [], a => line(esc(a.name), pl(a.members, 'membre') + ' · ' + (a.last ? 'dernière action il y a ' + pl(a.days, 'jour') : 'aucune action'), '')) || '<span class="muted">Aucune : toutes ont bougé ces 14 derniers jours.</span>'}
+        <h3>Membres jamais connectés : ${N(u.never_total || 0)}</h3>
+        ${rowsOf(u.never || [], a => line(esc(a.name), N(a.never) + ' sur ' + N(a.members) + ' membres n’ont pas encore ouvert l’application', '')) || '<span class="muted">Tous les membres ont un compte.</span>'}
+        <p class="help" style="margin:0">Ce sont des membres inscrits par le bureau, sans compte. Le trésorier encaisse pour eux, mais ils ne voient pas la caisse.</p>
+        <h3>Nouveaux comptes par semaine</h3>
+        ${bars(u.signups || [], r => r.accounts, r => wd(r.week), 'Nouveaux comptes par semaine sur 12 semaines', true)}
+        <p class="help" style="margin:0">Nouvelles associations sur 12 semaines : <b>${N((u.signups || []).reduce((t, r) => t + r.assocs, 0))}</b>.</p>
+      </section>
+      <section class="card stack"><h2>Où sont vos clients</h2>
+        <h3>Pays d’origine</h3>${kv(wh.origin)}
+        <h3>Pays où vit l’association</h3>${kv(wh.residence)}
+        <h3>Villes</h3>${kv(wh.city)}
+        <h3>Monnaies</h3>${kv(wh.currency)}
+      </section>
+      <section class="card stack"><h2>Santé du service</h2>
+        ${gauge(h.db_bytes || 0, h.db_limit || 1, 'Base de données')}
+        ${gauge(h.files_bytes || 0, h.files_limit || 1, 'Fichiers (photos, reçus, vocaux)')}
+        ${(h.files || []).length ? (h.files || []).map(f => `<div class="between num"><span>${esc({ proofs: 'Reçus', docs: 'Documents', voice: 'Messages vocaux', covers: 'Photos de couverture' }[f.bucket] || f.bucket)}</span><span>${N(f.n)} fichier${f.n > 1 ? 's' : ''} · ${mb(f.bytes)}</span></div>`).join('') : ''}
+        <p class="help" style="margin:0">Limites de l’offre gratuite de Supabase : 500 Mo pour la base et 1 Go pour les fichiers.</p>
+        <div class="between num"><span>Dernière sauvegarde</span>${h.last_backup ? `<b>${dFR(h.last_backup)} à ${hm(h.last_backup)}</b>` : '<span class="pill p-late">Aucune enregistrée</span>'}</div>
+        ${h.last_backup && (Date.now() - new Date(h.last_backup)) > 9 * 864e5 ? '<p class="err" style="margin:0">Plus de 9 jours sans sauvegarde : vérifiez GitHub.</p>' : ''}
+        <span class="muted" style="font-size:14px">${N(h.backups_30d || 0)} sauvegarde${h.backups_30d > 1 ? 's' : ''} en 30 jours (une par semaine prévue).</span>
+      </section>`;
+    };
     const wk = d.weekly || [], maxA = Math.max(1, ...wk.map(w => w.users));
     const ago = ts => { if (!ts) return 'jamais'; const h = (Date.now() - new Date(ts)) / 3600e3; return h < 1 ? 'il y a moins d’1 h' : h < 24 ? `il y a ${Math.round(h)} h` : `il y a ${Math.round(h / 24)} j`; };
     const health = a => { const h = a.last_activity ? (Date.now() - new Date(a.last_activity)) / 864e5 : 999; return h <= 7 ? ['p-ok', 'Active'] : h <= 30 ? ['p-late', 'Ralentit'] : ['p-red', 'Endormie']; };
@@ -460,6 +526,7 @@
       <section class="card stack"><h2>Personnes actives par semaine</h2>
         ${wk.length ? `<div class="wkbars" role="img" aria-label="Personnes actives par semaine sur 12 semaines">${wk.map(w => `<div class="wk"><span class="n num">${w.users}</span><i style="height:${Math.max(4, Math.round(w.users / maxA * 100))}%"></i><small>${new Date(w.week + 'T12:00:00').getDate()}/${new Date(w.week + 'T12:00:00').getMonth() + 1}</small></div>`).join('')}</div>` : '<span class="muted">Pas encore d’activité.</span>'}
         <p class="help">Une personne est active quand elle fait une action (paiement, message, vote…) dans la semaine.</p></section>
+      ${ins ? insightsHtml(ins) : ''}
       ${subs ? subsHtml(subs) : ''}
       <h2>Associations</h2>
       <div class="list">${(d.list || []).map(a => { const [cl, lb] = health(a); return `<div class="item"><div class="body"><div class="t">${esc(a.name)}</div><div class="s wrap num">${N(a.members)} membre${a.members > 1 ? 's' : ''} · ${N(a.on_app)} sur l’app${a.pending ? ' · ' + N(a.pending) + ' en attente' : ''} · ${N(a.actions_30d)} actions en 30 j · dernière ${ago(a.last_activity)}</div><div class="s wrap num">${esc([a.village, a.residence_city].filter(Boolean).join(' · '))} · créée le ${dFR(a.created_at)} · solde ${money(a.balance, a.currency)}</div></div><span class="pill ${cl}">${lb}</span></div>`; }).join('') || '<div class="empty">Aucune association.</div>'}</div>

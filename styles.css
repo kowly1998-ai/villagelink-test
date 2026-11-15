@@ -514,3 +514,5 @@ summary{min-height:44px}
   .tab[aria-current="page"]{font-weight:600}
 }
 @media (max-width:359px){.tab .ic{width:46px} .tabs-in{padding:6px 2px 8px}}
+/* v2.3.2 : tableau de bord du propriétaire */
+.admin h3{font-size:16px;font-weight:700;margin:6px 0 0}
