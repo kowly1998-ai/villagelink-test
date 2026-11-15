@@ -78,7 +78,8 @@ const RPC = {
       never_total: 98765, never: [{ id: AID, name: ASSOC.name, never: 300, members: 307 }], signups: Array.from({ length: 12 }, (_, i) => ({ week: ago(7 * (11 - i)).slice(0, 10), assocs: i % 3, accounts: i * 7 })) },
     alerts: { no_treasurer: [{ id: AID, name: ASSOC.name, members: 307 }], stuck_expenses: [{ assoc: ASSOC.name, amount: BIG, currency: 'GNF', category: 'Projets', days: 12 }], near_tier: [{ id: AID, name: ASSOC.name, members: 29, tier: 'petite', limit: 30 }], unpaid: [{ id: AID, name: ASSOC.name, status: 'grace', members: 307 }, { id: id(11), name: ASSOC.name, status: 'readonly', members: 3 }] },
     where: { origin: [{ k: 'Guinée', n: 1200 }, { k: 'Non renseigné', n: 34 }], residence: [{ k: 'Sénégal', n: 900 }], city: [{ k: 'Dakar-Pikine-Guédiawaye', n: 800 }], currency: [{ k: 'GNF', n: 1000 }, { k: 'XOF', n: 234 }] },
-    health: { db_bytes: 450 * 1048576, db_limit: 500 * 1048576, files_bytes: 12345678, files_limit: 1073741824, files: [{ bucket: 'proofs', bytes: 12000000, n: 345 }, { bucket: 'voice', bytes: 345678, n: 1 }], last_backup: ago(12), backups_30d: 2 } })
+    health: { db_bytes: 450 * 1048576, db_limit: 500 * 1048576, files_bytes: 12345678, files_limit: 1073741824, files: [{ bucket: 'proofs', bytes: 12000000, n: 345 }, { bucket: 'voice', bytes: 345678, n: 1 }], last_backup: ago(12), backups_30d: 2 } }),
+  sub_quote: () => ({ plan: 'moyenne', amount: 25000, months: 12, members: 60, discounted: true })
 };
 
 // Lecture des filtres simples de l'API (col=eq.x, col=in.(a,b), limit) pour servir les fiches.
