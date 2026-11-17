@@ -133,6 +133,9 @@ const OVERFLOW = () => {
 
 const PRES = ['', 'vie', 'caisse', 'membres', 'membres?f=late', `m/${M2}`, 'cotisations', 'cotisations?f=late', 'cotisations?f=claims', 'encaisser', `encaisser?m=${M2}`, 'abonnement', 'payer', 'finances', 'op/1', 'op/1?recu=1', 'op/2', 'sections', 'collectes', `collecte/${CID}`, 'depenses', 'depense/1', 'transparence', 'projets', `p/${PID}`, 'annonces', 'reunions', `r/${RID}`, `r/${RID}/feuille`, 'votes', `vote/${VID}`, 'documents', `rapport?m=${YM}`, 'rapportannuel', 'notifications', 'discussion', 'journal', 'plus', 'parametres', '#/admin'];
 const MEMB = ['', 'cotisations', 'payer', 'finances', 'plus'];
+PRES.push('#/rejoindre/AB12CD34');   // lien d'invitation (v2.4.0) : le code est prérempli
+// FIRSTSTEPS=1 : association toute neuve (sans numéro Wave ni Orange Money) pour voir la carte « Premiers pas ».
+if (process.env.FIRSTSTEPS) { T.pay_numbers = []; }
 
 async function main() {
   fs.mkdirSync(OUT, { recursive: true });
@@ -173,7 +176,15 @@ async function main() {
       if (/Chargement…/.test(txt) && txt.length < 200) pb.push('l’écran reste sur « Chargement… »');
       pb.push(...await page.evaluate(OVERFLOW));
       const name = (s || 'accueil').replace(/[^\w-]+/g, '_').slice(0, 40);
-      if (!s) {   // Alerte « numéros de paiement changés » (audit S9) : chez le président seulement
+      if (s.startsWith('#/rejoindre/')) {
+        const v = await page.locator('#jn-code').inputValue().catch(() => '');
+        if (v !== 'AB12CD34') pb.push(`le code d’invitation n’est pas prérempli (« ${v} »)`);
+        const first = await page.evaluate(() => { const f = document.querySelector('form'); return f ? f.dataset.form : ''; });
+        if (first !== 'join') pb.push('le formulaire « Rejoindre » n’est pas en premier');
+      }
+      if (!s && who === 'président' && !process.env.FIRSTSTEPS && await page.locator('.first-steps').count() !== 0) pb.push('la carte « Premiers pas » s’affiche alors que tout est fait');
+      if (!s && who === 'président' && process.env.FIRSTSTEPS && await page.locator('.first-steps').count() !== 1) pb.push('la carte « Premiers pas » manque');
+      if (!s && !process.env.FIRSTSTEPS) {   // Alerte « numéros de paiement changés » (audit S9) : chez le président seulement
         const n = await page.locator('.pay-alert').count();
         if (who === 'président' && n !== 1) pb.push('l’alerte « Numéros de paiement changés » manque');
         if (who === 'membre' && n !== 0) pb.push('l’alerte des numéros s’affiche chez un simple membre');

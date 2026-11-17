@@ -360,6 +360,19 @@
     }
     const { parts, q } = parseHash();
     try {
+      // Lien d'invitation (v2.4.0) : #/rejoindre/<code>. Le code est gardé sur le téléphone
+      // pendant la création du compte, la confirmation par email ou la connexion Google.
+      if (parts[0] === 'rejoindre') {
+        const c = String(parts[1] || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+        if (c.length >= 4) store.set('vl:join', c);
+        history.replaceState(null, '', location.pathname + '#/');
+        if (!S.session) {
+          S.authMode = 'signup';
+          S.authMsg = 'Vous êtes invité à rejoindre une association. Créez votre compte (ou connectez-vous si vous en avez déjà un) : le code d’invitation sera déjà rempli.';
+          return renderAuth();
+        }
+        return go('#/bienvenue');
+      }
       if (!S.session) { if (!document.querySelector('form[data-form=auth]')) renderAuth(); return; }
       if (parts[0] === 'mot-de-passe') return renderNewPassword();
       if (parts[0] === 'bienvenue') return await renderWelcome();
@@ -374,6 +387,7 @@
   }
 
   async function goHome() {
+    if (store.get('vl:join')) return go('#/bienvenue');
     const last = store.get('vl:last');
     let rows;
     try { rows = must(await sb.rpc('my_memberships')); }
@@ -551,16 +565,19 @@
 
   async function renderWelcome() {
     const list = must(await sb.rpc('my_memberships')).filter(a => a.active || a.pending);
+    const joinCode = store.get('vl:join') || ''; if (joinCode) store.set('vl:join', '');   // utilisé une seule fois
     const owner = await sb.rpc('am_owner').then(r => !r.error && r.data === true, () => false);
     root.innerHTML = `<div class="auth" style="max-width:520px">
       ${owner ? `<a class="card between" href="#/admin" style="border-color:var(--gold)"><span><span class="eyebrow">Propriétaire</span><br><b>Tableau de bord VillageLink</b></span><span class="chev">${I.chev}</span></a>` : ''}
       <div class="between"><div class="brand"><img class="logo brand-ic" src="icon.svg" alt="" width="44" height="44"><b>VillageLink</b></div><button class="btn ghost sm" data-act="signout">Déconnexion</button></div>
       ${list.some(a => a.pending) ? '<button class="btn ghost block" data-act="reload">Actualiser : ma demande a-t-elle été validée ?</button>' : ''}
+      ${joinCode ? '<div id="join-first"></div>' : ''}
       ${list.length ? `<section class="stack"><span class="eyebrow">Mes associations</span><div class="list">${list.map(a => a.pending
         ? `<div class="item"><div class="logo letter">${esc(initials(a.name).slice(0, 1))}</div><div class="body"><div class="t">${esc(a.name)}</div><div class="s wrap">Demande envoyée. Un membre du bureau doit la valider.</div></div><span class="pill p-late">En attente</span></div>`
         : `<a class="item" href="#/a/${a.association_id}"><div class="logo letter">${esc(initials(a.name).slice(0, 1))}</div><div class="body"><div class="t">${esc(a.name)}</div><div class="s">${esc([a.village, a.residence_city].filter(Boolean).join(' · '))}</div></div><span class="chev">${I.chev}</span></a>`).join('')}</div></section>` : '<p class="lead">Bienvenue. Rejoignez votre association avec le code donné par le bureau, ou créez-la si vous en êtes le président.</p>'}
-      <form class="card stack" data-form="join" novalidate><h2>Rejoindre une association</h2>
-        <div class="field"><label for="jn-code">Code d’invitation</label><input id="jn-code" name="code" autocapitalize="characters" placeholder="Ex. 7K2P9QXA" required></div>
+      <form class="card stack${joinCode ? ' join-hi' : ''}" data-form="join" novalidate><h2>Rejoindre une association</h2>
+        ${joinCode ? '<p class="note" style="margin:0">Votre code d’invitation est déjà rempli. Ajoutez votre nom et votre téléphone, puis appuyez sur « Rejoindre ».</p>' : ''}
+        <div class="field"><label for="jn-code">Code d’invitation</label><input id="jn-code" name="code" autocapitalize="characters" placeholder="Ex. 7K2P9QXA" value="${esc(joinCode)}" required></div>
         <div class="field"><label for="jn-name">Votre nom complet</label><input id="jn-name" name="full_name" autocomplete="name" required></div>
         <div class="field"><label for="jn-phone">Votre téléphone</label><input id="jn-phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+221 77 000 00 00"><p class="help">Si le trésorier vous a déjà inscrit avec ce numéro, votre historique de cotisations vous suit. Le bureau valide chaque demande.</p></div>
         <p class="err" hidden></p><button class="btn primary block" type="submit">Rejoindre</button></form>
@@ -579,6 +596,11 @@
         <p class="err" hidden></p><button class="btn primary block" type="submit">Créer l’association</button></form>
       ${delAcctBox()}
     </div>`;
+    if (joinCode) {
+      const jf = root.querySelector('form[data-form=join]'), ph = $('#join-first');
+      if (jf && ph) ph.replaceWith(jf);
+      const nm = $('#jn-name'); if (nm) nm.focus();
+    }
   }
 
   /* ------------------------------------------------------------------
@@ -792,13 +814,32 @@
         status = `<section class="card status-card ok"><div class="between"><span class="eyebrow">Ma cotisation · ${esc(monthName)}</span><span class="pill p-ok">À jour</span></div><div class="big" style="font-size:28px">Vous êtes à jour</div><span class="muted">Merci ! Votre cotisation est payée.</span></section>`;
       }
     }
+    // Premiers pas (v2.4.0) : 5 étapes cochées toutes seules ; la carte disparaît quand tout est fait.
+    const firstSteps = me.role === 'president' && !isRO() ? (() => {
+      const pn = S.ctx.payNums || {};
+      const invited = !!store.get('vl:invited:' + a.id) || S.ctx.members.some(m => m.user_id && m.user_id !== S.user.id);
+      const steps = [
+        [hasFees(), 'Fixer la cotisation', 'Montant par mois et jour d’échéance.', 'parametres'],
+        [!!(pn.wave || pn.orange || pn.free), 'Ajouter le numéro Wave ou Orange Money', 'Les membres y envoient leur cotisation.', 'parametres'],
+        [S.ctx.members.some(m => m.role === 'tresorier' && m.active && !m.pending), 'Nommer le trésorier', 'Ouvrez sa fiche, puis « Modifier la fiche ».', 'membres'],
+        [activeMembers().length > 1, 'Ajouter les membres', 'Collez la liste depuis votre cahier ou WhatsApp.', 'membres/import'],
+        [invited, 'Inviter les membres', 'Envoyez le lien d’invitation sur WhatsApp.', 'parametres']
+      ];
+      const done = steps.filter(x => x[0]).length;
+      if (done === steps.length) return '';
+      return `<section class="card stack first-steps"><div class="between"><h2>Premiers pas</h2><span class="pill p-blue num">${done} sur ${steps.length}</span></div>
+        <div class="bar"><i style="width:${pct(done, steps.length)}%"></i></div>
+        <ol class="steps">${steps.map(([ok, t, sx, href], i) => ok
+          ? `<li class="ok"><span class="st-ic" aria-hidden="true">✓</span><span class="body"><span class="tt">${t}</span><span class="ss">Fait</span></span></li>`
+          : `<li><a href="${B()}/${href}"><span class="st-ic num" aria-hidden="true">${i + 1}</span><span class="body"><span class="tt">${t}</span><span class="ss">À faire · ${sx}</span></span><span class="chev">${I.chev}</span></a></li>`).join('')}</ol></section>`;
+    })() : '';
     const nClaims = isRO() ? 0 : claimsToConfirm().length;
     const todos = [
       nClaims ? todo(`${B()}/cotisations?f=claims`, I.clock, `${nClaims} paiement${nClaims > 1 ? 's' : ''} à confirmer`, 'Vérifiez dans votre Wave ou Orange Money.', true) : '',
       S.ctx.expPending && can('approve') ? todo(`${B()}/depenses`, I.out, `${S.ctx.expPending} dépense${S.ctx.expPending > 1 ? 's' : ''} à valider`, 'Le trésorier attend votre accord avant de sortir l’argent.', true) : '',
       pendingMembers().length && can('members') ? todo(`${B()}/membres?f=pending`, I.users, `${pendingMembers().length} demande${pendingMembers().length > 1 ? 's' : ''} d’adhésion`, 'Vérifiez que ce sont bien des ressortissants du village.', true) : '',
       fee && late && (pres || trea) ? todo(`${B()}/cotisations?f=late`, I.users, `${late} membre${late > 1 ? 's n’ont' : ' n’a'} pas payé`, `Cotisation de ${esc(pFR(cur))}`, false) : '',
-      act.length <= 1 && can('members') ? todo(`${B()}/membres/import`, I.list, 'Ajoutez la liste des membres', 'Collez-la depuis votre cahier, Excel ou WhatsApp.', false) : ''
+      act.length <= 1 && can('members') && !firstSteps ? todo(`${B()}/membres/import`, I.list, 'Ajoutez la liste des membres', 'Collez-la depuis votre cahier, Excel ou WhatsApp.', false) : ''
     ].join('');
     const monthCard = fee && (pres || trea) && dueNow.length ? `<section class="card stack"><div class="between"><span class="eyebrow">${esc(monthName)}</span><b class="num">${paidCount} sur ${dueNow.length} ont payé</b></div><div class="bar"><i style="width:${pct(collected, expected)}%"></i></div><span class="muted num" style="font-size:14px">${money(collected)} sur ${money(expected)} collectés</span></section>` : '';
     // Montant au milliard (francs guinéens) : chiffre plus petit, la monnaie passe à la ligne si besoin.
@@ -833,7 +874,7 @@
           <div class="row" style="flex-wrap:wrap;gap:8px"><button class="btn primary" data-act="paynum-ok" data-at="${esc(pn.updated_at)}">Ce sont les bons numéros</button><a class="btn ghost" href="${B()}/parametres">Corriger</a></div></section>`;
       })() : '';
     let L, R;
-    if (pres) { L = [greet, payAlert, presCash, status, todos, where, monthCard]; R = [projCard, pollCard, meetCard, colCards, opsCard, actCard]; }
+    if (pres) { L = [greet, firstSteps, payAlert, presCash, status, todos, where, monthCard]; R = [projCard, pollCard, meetCard, colCards, opsCard, actCard]; }
     else if (trea) { L = [greet, status, todos, monthCard, shortcuts, pollCard, meetCard, colCards]; R = [cash, lateCard, opsCard, projCard, actCard]; }
     else { L = [greet, status, todos, cash, pollCard, meetCard, colCards, projCard]; R = [opsCard, actCard]; }
     return `${coverBanner}<div class="home-grid"><div class="home-l">${L.join('')}</div><div class="home-r">${R.join('')}</div></div>`;
@@ -2193,15 +2234,19 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       ${ed ? '<p class="err" hidden></p><button class="btn primary block" type="submit">Enregistrer les numéros</button><p class="help">Laissez vide un service que vous n’utilisez pas. Tous les membres seront prévenus du changement.</p>' : ''}</form>`;
   };
 
+  // Message d'invitation (v2.4.0) : un lien qui remplit le code tout seul, et le code en secours.
+  const joinLink = a => location.origin + location.pathname + '#/rejoindre/' + encodeURIComponent(a.invite_code);
+  const inviteText = a => `Rejoignez « ${a.name} » sur VillageLink pour suivre les cotisations et les projets du village.\n\nAppuyez sur ce lien, créez votre compte, puis appuyez sur « Rejoindre » :\n${joinLink(a)}\n\nSi le lien ne s’ouvre pas, allez sur ${location.origin + location.pathname} et entrez ce code : ${a.invite_code}`;
+
   V.parametres = async () => {
     const a = S.ctx.assoc, pres = can('settings');
-    const invite = `Rejoignez « ${a.name} » sur VillageLink pour suivre les cotisations et les projets du village.\n\n1. Ouvrez ${location.origin + location.pathname}\n2. Créez votre compte\n3. Entrez le code : ${a.invite_code}`;
+    const invite = inviteText(a);
     const ro = pres ? '' : 'disabled';
     const cvPrev = can('cover') ? await coverUrl(a) : '';
     return `${subHead('Association', B() + '/plus')}
       <section class="card stack"><h2>Code d’invitation</h2><p class="muted" style="margin:0;font-size:14px">Les membres créent leur compte puis entrent ce code. Ceux que le trésorier a déjà inscrits retrouvent leur historique grâce à leur numéro de téléphone.</p>
         <div class="code">${esc(a.invite_code)}</div>
-        <a class="btn wa block" target="_blank" rel="noopener" href="${waShare(invite)}">${I.wa} Envoyer l’invitation sur WhatsApp</a>
+        <a class="btn wa block" target="_blank" rel="noopener" data-act="invited" href="${waShare(invite)}">${I.wa} Envoyer l’invitation sur WhatsApp</a>
         ${pres ? '<button class="btn ghost sm" data-act="newcode">Changer le code</button>' : ''}</section>
       ${can('members') ? `<section class="card stack"><h2>Exporter les données</h2><p class="muted" style="margin:0;font-size:14px">Téléchargez un fichier que vous ouvrez dans Excel : la liste des membres, ou toutes les opérations de la caisse.</p><div class="row" style="flex-wrap:wrap"><button class="btn ghost sm" data-act="exp" data-what="membres">Les membres</button><button class="btn ghost sm" data-act="exp" data-what="operations">Les opérations</button></div><p class="help">La liste des membres contient les numéros de téléphone : gardez le fichier pour vous.</p></section>` : ''}
       ${can('cover') ? `<form class="card stack" data-form="cover" novalidate><h2>Photo de couverture</h2><p class="muted" style="margin:0;font-size:14px">Elle s’affiche en haut de l’accueil pour tous les membres. Choisissez une belle photo du village.</p>
@@ -2658,6 +2703,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
       }
       else if (act === 'signout') { await pushOff(true).catch(() => {}); clearOfflineData(); await sb.auth.signOut(); S.ctx = null; S.authMode = 'login'; S.authMsg = ''; S.session = null; S.user = null; location.hash = '#/'; renderAuth(); }
       else if (act === 'reload') location.reload();
+      else if (act === 'invited') { if (S.ctx) store.set('vl:invited:' + S.ctx.assoc.id, '1'); }   // le lien WhatsApp s'ouvre normalement
       else if (act === 'own-act') { must(await sb.rpc('owner_activate', { p_request: Number(b.dataset.id), p_until: b.dataset.until })); toast('Abonnement activé jusqu’au ' + dFR(b.dataset.until)); renderAdmin(); }
       else if (act === 'own-rej') { const f = document.getElementById('orj-' + b.dataset.id); if (f) f.hidden = false; }
       else if (act === 'own-block') { const f = document.getElementById('obk-' + b.dataset.id); if (f) f.hidden = false; }
