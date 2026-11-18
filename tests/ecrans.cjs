@@ -79,7 +79,7 @@ const RPC = {
     alerts: { no_treasurer: [{ id: AID, name: ASSOC.name, members: 307 }], stuck_expenses: [{ assoc: ASSOC.name, amount: BIG, currency: 'GNF', category: 'Projets', days: 12 }], near_tier: [{ id: AID, name: ASSOC.name, members: 29, tier: 'petite', limit: 30 }], unpaid: [{ id: AID, name: ASSOC.name, status: 'grace', members: 307 }, { id: id(11), name: ASSOC.name, status: 'readonly', members: 3 }] },
     where: { origin: [{ k: 'Guinée', n: 1200 }, { k: 'Non renseigné', n: 34 }], residence: [{ k: 'Sénégal', n: 900 }], city: [{ k: 'Dakar-Pikine-Guédiawaye', n: 800 }], currency: [{ k: 'GNF', n: 1000 }, { k: 'XOF', n: 234 }] },
     health: { db_bytes: 450 * 1048576, db_limit: 500 * 1048576, files_bytes: 12345678, files_limit: 1073741824, files: [{ bucket: 'proofs', bytes: 12000000, n: 345 }, { bucket: 'voice', bytes: 345678, n: 1 }], last_backup: ago(12), backups_30d: 2 } }),
-  sub_quote: () => ({ plan: 'moyenne', amount: 25000, months: 12, members: 60, discounted: true })
+  sub_quote: (b) => ({ plan: 'moyenne', amount: b && b.p_months === 1 ? 7500 : 50000, months: b && b.p_months || 12, members: 60, discounted: !(b && b.p_months === 1) })
 };
 
 // Lecture des filtres simples de l'API (col=eq.x, col=in.(a,b), limit) pour servir les fiches.
@@ -102,7 +102,7 @@ function mock(route) {
   if (p.startsWith('/storage/v1/object/sign/')) return json({ signedURL: p.replace('/storage/v1', '') + '?token=test' });
   if (p.startsWith('/storage/v1/')) return route.fulfill({ status: 404, body: '' });
   const rpc = /^\/rest\/v1\/rpc\/(\w+)/.exec(p);
-  if (rpc) return json(RPC[rpc[1]] ? RPC[rpc[1]]() : []);
+  if (rpc) { let body = null; try { body = JSON.parse(req.postData() || 'null'); } catch (e) { /* corps vide */ } return json(RPC[rpc[1]] ? RPC[rpc[1]](body) : []); }
   const tb = /^\/rest\/v1\/(\w+)/.exec(p);
   if (tb) {
     if (req.method() !== 'GET' && req.method() !== 'HEAD') return json({ message: 'test en lecture seule' }, 403);
