@@ -325,6 +325,8 @@
     const late = owed.filter(isLate);
     return { owed, late, remaining: owed.reduce((s, p) => s + feeOf(m, p) - paidFor(m.id, p), 0), isLate: late.length > 0 };
   }
+  // Liste de mois lisible : jusqu'à 3 mois en entier, au-delà « premier → dernier (N mois) » (v2.4.5).
+  const monthsLabel = ps => ps.length > 3 ? `${pFR(ps[0])} → ${pFR(ps[ps.length - 1])} (${ps.length} mois)` : ps.map(pFR).join(', ');
   // Un paiement plus grand que le reste du mois est réparti sur les mois suivants (v2.2.3).
   function spread(m, period, amount) {
     const rows = []; let rem = amount, p = period;
@@ -1152,7 +1154,7 @@
       const base = S.ctx.assoc.currency, c = $('#pay-cur') ? $('#pay-cur').value : base, r = Number(($('#pay-rate') || {}).value), v = Number(String(am.value).replace(',', '.')) || 0;
       const got = c === base ? v : (r > 0 ? Math.round(v * r) : 0), left = Math.max(dues(m).remaining - got, 0);
       const sp = c === base && Number.isInteger(v) && v > 0 ? spread(m, ps.value, v) : null;
-      $('#pay-recap').innerHTML = `<dt>${sp && sp.length > 1 ? 'Mois couverts' : 'Mois couvert'}</dt><dd>${sp && sp.length > 1 ? esc(sp.map(x => pFR(x.period)).join(', ')) : esc(pFR(ps.value))}</dd><dt>Reste dû après</dt>${c === base && !Number.isInteger(v) ? '<dd class="due">Montant à corriger</dd>' : `<dd class="${left ? 'due' : ''}">${left ? money(left) : 'À jour'}</dd>`}${m.phone ? `<dt>Reçu à envoyer à</dt><dd>${esc(m.phone)}</dd>` : ''}`;
+      $('#pay-recap').innerHTML = `<dt>${sp && sp.length > 1 ? 'Mois couverts' : 'Mois couvert'}</dt><dd>${sp && sp.length > 1 ? esc(monthsLabel(sp.map(x => x.period))) : esc(pFR(ps.value))}</dd><dt>Reste dû après</dt>${c === base && !Number.isInteger(v) ? '<dd class="due">Montant à corriger</dd>' : `<dd class="${left ? 'due' : ''}">${left ? money(left) : 'À jour'}</dd>`}${m.phone ? `<dt>Reçu à envoyer à</dt><dd>${esc(m.phone)}</dd>` : ''}`;
     };
     // Montant proposé = reste dû, converti dans la monnaie reçue.
     const due = () => Math.max(feeSel() - paidFor(ms.value, ps.value), 0) || feeSel();
@@ -1279,7 +1281,7 @@
       const k = (MM.find(([l]) => l === m) || [])[1], num = k ? pn[k] : '';
       const amt = Number(am.value) || 0, wl = m === 'Wave' && /^https:\/\/pay\.wave\.com\/m\//.test(pn.wave_link || '') ? pn.wave_link.replace(/\/?$/, '/') + '?amount=' + amt : '';
       const rows = amt > 0 ? spread(me, ps.value, amt) : [];
-      const cover = !amt ? '<p class="help" style="margin:0">Cochez au moins un mois.</p>' : rows ? `<p class="help" style="margin:0">Ce paiement couvre : <b>${rows.map(x => esc(pFR(x.period)) + (x.amount < feeOf(me, x.period) - paidFor(me.id, x.period) ? ' (en partie)' : '')).join(', ')}</b>.</p>` : '<p class="note" style="margin:0">Ce montant dépasse 24 mois de cotisation. Réduisez-le.</p>';
+      const cover = !amt ? '<p class="help" style="margin:0">Cochez au moins un mois.</p>' : rows ? `<p class="help" style="margin:0">Ce paiement couvre : <b>${esc(monthsLabel(rows.map(x => x.period)))}</b>${(l => l && l.amount < feeOf(me, l.period) - paidFor(me.id, l.period) ? ` (${esc(pFR(l.period))} en partie)` : '')(rows[rows.length - 1])}.</p>` : '<p class="note" style="margin:0">Ce montant dépasse 24 mois de cotisation. Réduisez-le.</p>';
       const feeNote = wl ? '' : `<p class="help" style="margin:0">${m === 'Wave' ? 'Wave prend en général environ 1 % de frais à l’envoi. ' : esc(m) + ' peut prendre des frais à l’envoi, selon le montant. '}Ces frais sont à votre charge : l’association doit recevoir exactement ${money(amt)}.</p>`;
       box.innerHTML = cover + (wl ? `<a class="btn block wave-btn" href="${esc(wl)}" target="_blank" rel="noopener">Payer ${money(amt)} avec Wave</a><p class="help" style="margin:0">Wave s’ouvre avec le montant déjà rempli. Après le paiement, revenez ici et touchez « J’ai payé ».</p><span class="eyebrow" style="margin-top:4px">Ou à la main</span>` : `<span class="eyebrow">Envoyez avec votre application ${esc(m)}</span>`) + `
         <div class="between" style="flex-wrap:wrap"><span><span class="muted" style="font-size:14px">Au numéro</span><br><b class="num" style="font-size:20px">${esc(num)}</b></span><button type="button" class="btn ghost sm" data-act="copy" data-v="${esc(num.replace(/\s/g, ''))}">Copier le numéro</button></div>
