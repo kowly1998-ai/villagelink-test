@@ -961,9 +961,25 @@
           ? `<button class="btn danger block" data-act="memberactive" data-id="${m.id}" data-v="0">Retirer de l’association</button><p class="help">${esc(m.full_name)} n’aura plus accès à l’application et n’aura plus de cotisation due. Ses paiements restent dans l’historique, pour la transparence.</p>`
           : `<button class="btn ghost block" data-act="memberactive" data-id="${m.id}" data-v="1">Réintégrer dans l’association</button>`) : ''}
       </div>
+      ${presTransferCard(m)}
       ${hist.length ? `<section class="stack"><span class="eyebrow">Historique des paiements</span><div class="list">${hist.map(t => txItem(t, rset)).join('')}</div></section>` : ''}`;
   };
   AFTER.m = () => {};
+
+  // Passation de la présidence : une association n'a qu'un président (v2.4.3, transfer_presidency dans la base).
+  function presTransferCard(m) {
+    const me = S.ctx.me;
+    if (!can('roles') || !me || me.role !== 'president' || m.id === me.id || m.role === 'president' || !m.active || m.pending || isRO()) return '';
+    const first = esc(m.full_name.split(' ')[0]);
+    if (!m.user_id) return `<section class="card stack"><h2>Passer la présidence</h2><p class="help" style="margin:0">${first} n’a pas encore de compte VillageLink relié. Il doit d’abord rejoindre l’association avec le code d’invitation, puis vous pourrez lui passer la présidence.</p></section>`;
+    const mine = [['vice_president', 'Vice-président'], ['secretaire', 'Secrétaire général'], ['tresorier', 'Trésorier'], ['projets', 'Responsable des projets'], ['membre', 'Membre']];
+    return `<section class="card stack"><details class="more"><summary>Passer la présidence à ${first}</summary>
+      <form class="stack" data-form="transferpres" data-id="${m.id}" novalidate style="margin-top:8px">
+        <p class="help" style="margin:0">${esc(m.full_name)} deviendra le président de l’association. Vous ne serez plus président et vous ne pourrez plus changer les rôles ni les paramètres.</p>
+        <div class="field"><label for="tp-role">Votre nouveau rôle</label><select id="tp-role" name="my_role">${mine.map(([k, l]) => opt(k, l, 'vice_president')).join('')}</select></div>
+        <div class="field"><label class="check"><input type="checkbox" name="ok"> Je confirme : ${esc(m.full_name)} devient président</label></div>
+        <p class="err" hidden></p><button class="btn danger block" type="submit">Passer la présidence</button></form></details></section>`;
+  }
 
   // Dispense temporaire (sans travail, au village…) : le bureau l'accorde, tout le monde la voit, seul le bureau lit le motif.
   const EX_REASONS = ['Sans travail', 'Sans travail, au village', 'Maladie', 'Études', 'Autre'];
@@ -995,7 +1011,7 @@
   }
 
   function memberForm(m) {
-    const isNew = !m, r = m ? m.role : 'membre';
+    const isNew = !m, r = m ? m.role : 'membre', nPres = activeMembers().filter(x => x.role === 'president').length;
     if (!can('members')) return `${subHead('Membre')}<p class="note">Seul le bureau peut ajouter ou modifier un membre.</p>`;
     if (m && m.role !== 'membre' && !can('roles')) return `${subHead('Membre', B() + '/m/' + m.id)}<p class="note">Seul le président modifie la fiche d’un membre du bureau.</p>`;
     return `${subHead(isNew ? 'Ajouter un membre' : 'Modifier la fiche', isNew ? B() + '/membres' : B() + '/m/' + m.id)}
@@ -1007,7 +1023,8 @@
         ${(S.ctx.sections || []).length ? `<div class="field"><label for="mb-sec">Section</label><select id="mb-sec" name="section_id"><option value="">Aucune section</option>${S.ctx.sections.map(x => opt(x.id, x.name, m ? m.section_id : '')).join('')}</select></div>` : ''}
         <div class="field"><label for="mb-email">Email (facultatif)</label><input id="mb-email" name="email" type="email" value="${esc(m && m.email)}"></div>
         <div class="field"><label for="mb-joined">Date d’adhésion</label><input id="mb-joined" name="joined_on" type="date" value="${esc(m ? m.joined_on : todayISO())}"><p class="help">Les cotisations sont dues à partir de ce mois.</p></div>
-        ${can('roles') ? `<div class="field"><label for="mb-role">Fonction dans l’association</label><select id="mb-role" name="role">${Object.entries(ROLES).map(([k, l]) => opt(k, l, r)).join('')}</select><p class="help" id="mb-role-help" data-roles='${esc(JSON.stringify(ROLE_HELP))}'>${esc(ROLE_HELP[r] || '')}</p></div>` : ''}
+        ${can('roles') && r === 'president' && nPres < 2 ? `<div class="field"><span style="font-size:14px;font-weight:500;color:var(--muted)">Fonction dans l’association</span><p style="margin:4px 0 0"><b>Président</b></p><p class="help">Une association n’a qu’un président. Pour céder ce rôle, ouvrez la fiche du futur président et touchez « Passer la présidence ».</p></div>` : ''}
+        ${can('roles') && (r !== 'president' || nPres > 1) ? `<div class="field"><label for="mb-role">Fonction dans l’association</label><select id="mb-role" name="role">${Object.entries(ROLES).filter(([k]) => k !== 'president' || r === 'president').map(([k, l]) => opt(k, l, r)).join('')}</select><p class="help" id="mb-role-help" data-roles='${esc(JSON.stringify(ROLE_HELP))}'>${esc(ROLE_HELP[r] || '')}</p></div>` : ''}
         ${!isNew ? `<div class="field"><label class="check"><input type="checkbox" name="active" ${m.active ? 'checked' : ''}> Membre actif</label><p class="help">Décocher revient à retirer le membre de l’association : il perd l’accès et n’a plus de cotisation due. Son historique est conservé.</p></div>` : ''}
         <p class="err" hidden></p><button class="btn primary block" type="submit">${isNew ? 'Ajouter' : 'Enregistrer'}</button></form>`;
   }
@@ -2389,6 +2406,12 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
         mid = must(await sb.from('members').insert(row).select('id').single()).id;
       }
       await refresh(); toast(id ? 'Fiche enregistrée' : 'Membre ajouté'); go(B() + '/m/' + mid);
+    },
+    async transferpres(fd, form) {
+      if (fd.get('ok') !== 'on') fail('Cochez la case pour confirmer.');
+      const t = S.ctx.byId.get(form.dataset.id);
+      must(await sb.rpc('transfer_presidency', { p_member: form.dataset.id, p_my_role: val(fd, 'my_role') }));
+      await refresh(); toast((t ? t.full_name : 'Le membre') + ' est maintenant président'); go(B() + '/m/' + form.dataset.id);
     },
     async import(fd) {
       const rows = parseImport(fd.get('text'));

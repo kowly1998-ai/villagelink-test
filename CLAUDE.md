@@ -10,7 +10,7 @@ transparentes, projets, annonces, réunions et discussion.
   Claude écrit, vérifie et met en ligne le code.
 - Répondre en français simple, sans jargon. À la fin de chaque changement, dire précisément
   quoi tester sur le téléphone.
-- Version actuelle : **2.4.2 sur le site de test (24/11/2026) ; vraie app en 2.4.1 (mise en ligne le 18/11/2026, PR 33)** (design v2, suspension d'association, photo de couverture, nouvelle icône, export CSV, rapport annuel, feuille de présence, verrou par code).
+- Version actuelle : **2.4.3 sur le site de test (24/11/2026) ; vraie app en 2.4.1 (mise en ligne le 18/11/2026, PR 33)** (design v2, suspension d'association, photo de couverture, nouvelle icône, export CSV, rapport annuel, feuille de présence, verrou par code).
 
 ## Stack
 
@@ -71,7 +71,7 @@ Accueil sans association → Cadre d'une association → Écrans → Formulaires
 - **Fonctions** : 90 au 12/11/2026, liste complète dans `supabase/schema.sql`. Les plus utilisées par l'app :
   `create_association`, `join_association`, `review_join`, `regenerate_invite_code`, `my_memberships`,
   `member_contacts`, `reverse_transaction`, `declare_payment`, `confirm_payment_claim`, `hide_message`,
-  `create_poll`, `cast_vote`, `close_poll`, `poll_results`, `server_now` (heure du serveur pour les retards)
+  `create_poll`, `cast_vote`, `close_poll`, `poll_results`, `transfer_presidency` (un seul président), `server_now` (heure du serveur pour les retards)
   (votes : aucune écriture directe dans les tables).
 - **Stockage** : buckets privés `proofs` (justificatifs de paiement, 5 Mo maximum), `docs`
   (documents de l'association, 10 Mo maximum), `voice` (messages vocaux, 3 Mo) et `covers` (photo de couverture, 2 Mo, réduite sur le téléphone avant l'envoi). Chemin : `<id association>/<fichier>`.
