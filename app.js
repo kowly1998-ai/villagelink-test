@@ -140,6 +140,8 @@
   /* ------------------------------------------------------------------
      Rôles et droits (la base les vérifie aussi)
   ------------------------------------------------------------------ */
+  // Limites de rôles (v2.4.4, même règle que role_cap dans la base) : 1 président, 3 vice-présidents, 3 trésoriers.
+  const ROLE_CAP = { president: 1, vice_president: 3, tresorier: 3 };
   const ROLES = { president: 'Président', vice_president: 'Vice-président', secretaire: 'Secrétaire général', tresorier: 'Trésorier', projets: 'Responsable des projets', membre: 'Membre' };
   const ROLE_HELP = {
     president: 'Tous les droits : membres, rôles, paramètres, argent, projets, annonces, réunions, votes. Valide les dépenses.',
@@ -967,6 +969,11 @@
   AFTER.m = () => {};
 
   // Passation de la présidence : une association n'a qu'un président (v2.4.3, transfer_presidency dans la base).
+  // Option de fonction : grisée si la limite est atteinte (sauf pour le rôle actuel du membre).
+  const roleOpt = (k, l, cur, exceptId) => {
+    const cap = ROLE_CAP[k], n = cap ? activeMembers().filter(x => x.role === k && x.id !== exceptId).length : 0, full = cap && k !== cur && n >= cap;
+    return `<option value="${esc(k)}" ${k === cur ? 'selected' : ''} ${full ? 'disabled' : ''}>${esc(l)}${full ? ` (complet : ${cap})` : ''}</option>`;
+  };
   function presTransferCard(m) {
     const me = S.ctx.me;
     if (!can('roles') || !me || me.role !== 'president' || m.id === me.id || m.role === 'president' || !m.active || m.pending || isRO()) return '';
@@ -976,7 +983,7 @@
     return `<section class="card stack"><details class="more"><summary>Passer la présidence à ${first}</summary>
       <form class="stack" data-form="transferpres" data-id="${m.id}" novalidate style="margin-top:8px">
         <p class="help" style="margin:0">${esc(m.full_name)} deviendra le président de l’association. Vous ne serez plus président et vous ne pourrez plus changer les rôles ni les paramètres.</p>
-        <div class="field"><label for="tp-role">Votre nouveau rôle</label><select id="tp-role" name="my_role">${mine.map(([k, l]) => opt(k, l, 'vice_president')).join('')}</select></div>
+        <div class="field"><label for="tp-role">Votre nouveau rôle</label><select id="tp-role" name="my_role">${mine.map(([k, l]) => roleOpt(k, l, '', me.id)).join('')}</select></div>
         <div class="field"><label class="check"><input type="checkbox" name="ok"> Je confirme : ${esc(m.full_name)} devient président</label></div>
         <p class="err" hidden></p><button class="btn danger block" type="submit">Passer la présidence</button></form></details></section>`;
   }
@@ -1024,7 +1031,7 @@
         <div class="field"><label for="mb-email">Email (facultatif)</label><input id="mb-email" name="email" type="email" value="${esc(m && m.email)}"></div>
         <div class="field"><label for="mb-joined">Date d’adhésion</label><input id="mb-joined" name="joined_on" type="date" value="${esc(m ? m.joined_on : todayISO())}"><p class="help">Les cotisations sont dues à partir de ce mois.</p></div>
         ${can('roles') && r === 'president' && nPres < 2 ? `<div class="field"><span style="font-size:14px;font-weight:500;color:var(--muted)">Fonction dans l’association</span><p style="margin:4px 0 0"><b>Président</b></p><p class="help">Une association n’a qu’un président. Pour céder ce rôle, ouvrez la fiche du futur président et touchez « Passer la présidence ».</p></div>` : ''}
-        ${can('roles') && (r !== 'president' || nPres > 1) ? `<div class="field"><label for="mb-role">Fonction dans l’association</label><select id="mb-role" name="role">${Object.entries(ROLES).filter(([k]) => k !== 'president' || r === 'president').map(([k, l]) => opt(k, l, r)).join('')}</select><p class="help" id="mb-role-help" data-roles='${esc(JSON.stringify(ROLE_HELP))}'>${esc(ROLE_HELP[r] || '')}</p></div>` : ''}
+        ${can('roles') && (r !== 'president' || nPres > 1) ? `<div class="field"><label for="mb-role">Fonction dans l’association</label><select id="mb-role" name="role">${Object.entries(ROLES).filter(([k]) => k !== 'president' || r === 'president').map(([k, l]) => roleOpt(k, l, r, m && m.id)).join('')}</select><p class="help" id="mb-role-help" data-roles='${esc(JSON.stringify(ROLE_HELP))}'>${esc(ROLE_HELP[r] || '')}</p></div>` : ''}
         ${!isNew ? `<div class="field"><label class="check"><input type="checkbox" name="active" ${m.active ? 'checked' : ''}> Membre actif</label><p class="help">Décocher revient à retirer le membre de l’association : il perd l’accès et n’a plus de cotisation due. Son historique est conservé.</p></div>` : ''}
         <p class="err" hidden></p><button class="btn primary block" type="submit">${isNew ? 'Ajouter' : 'Enregistrer'}</button></form>`;
   }

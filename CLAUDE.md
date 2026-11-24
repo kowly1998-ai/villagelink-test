@@ -10,7 +10,7 @@ transparentes, projets, annonces, réunions et discussion.
   Claude écrit, vérifie et met en ligne le code.
 - Répondre en français simple, sans jargon. À la fin de chaque changement, dire précisément
   quoi tester sur le téléphone.
-- Version actuelle : **2.4.3 sur le site de test (24/11/2026) ; vraie app en 2.4.1 (mise en ligne le 18/11/2026, PR 33)** (design v2, suspension d'association, photo de couverture, nouvelle icône, export CSV, rapport annuel, feuille de présence, verrou par code).
+- Version actuelle : **2.4.4 sur le site de test (24/11/2026) ; vraie app en 2.4.1 (mise en ligne le 18/11/2026, PR 33)** (design v2, suspension d'association, photo de couverture, nouvelle icône, export CSV, rapport annuel, feuille de présence, verrou par code).
 
 ## Stack
 
@@ -80,7 +80,7 @@ Accueil sans association → Cadre d'une association → Écrans → Formulaires
 
 ## Rôles et droits
 
-Rôles : `president`, `vice_president`, `secretaire`, `tresorier`, `projets`, `membre`.
+Rôles : `president`, `vice_president`, `secretaire`, `tresorier`, `projets`, `membre`. Limites (v2.4.3-2.4.4, vérifiées par la base) : 1 président, 3 vice-présidents, 3 trésoriers actifs ; la présidence se transmet avec `transfer_presidency`.
 
 | Droit (`CAN` dans `app.js`) | Rôles autorisés |
 |---|---|
