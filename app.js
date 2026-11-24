@@ -1213,12 +1213,17 @@
     const pendP = new Set(mine.filter(c => c.status === 'pending').map(c => c.period));
     const d = dues(me), cur = curYM();
     const opts = [...new Set([...d.owed, cur, addMonth(cur, 1), addMonth(cur, 2)])].sort().filter(p => paidFor(me.id, p) < feeOf(me, p) && !pendP.has(p) && !exemptOf(me, p));
+    // Pas de mois après un paiement en attente : la répartition à la confirmation passerait par ce mois (v2.4.2).
+    const stopP = [...pendP].sort().find(p => opts.length && p > opts[0]); if (stopP) opts.splice(0, opts.length, ...opts.filter(p => p < stopP));
+    const defSel = new Set(opts.filter(p => d.owed.includes(p)).length ? opts.filter(p => d.owed.includes(p)) : opts.slice(0, 1));
     const ST = { pending: ['p-late', 'En attente du trésorier'], confirmed: ['p-ok', 'Confirmé'], rejected: ['p-red', 'Refusé'], cancelled: ['p-blue', 'Annulé'] };
     const hist = mine.length ? `<section class="stack"><h2>Mes paiements déclarés</h2><div class="list">${mine.map(c => `<div class="item" style="align-items:flex-start"><div class="body"><div class="t num" style="white-space:normal">${money(c.amount)} · ${esc(c.method)}</div><div class="s wrap">${esc(pFR(c.period))} · ${dFR(localDay(c.created_at))} à ${hm(c.created_at)}${c.reference ? ' · réf. ' + esc(c.reference) : ''}${c.status === 'rejected' && c.reason ? '<br>Motif : ' + esc(c.reason) : ''}</div>${c.status === 'pending' ? `<button class="btn ghost sm" style="margin-top:8px" data-act="claim-cancel" data-id="${c.id}">Annuler cette déclaration</button>` : ''}${c.status === 'confirmed' && c.transaction_id ? `<a class="link" style="display:inline-block;margin-top:6px" href="${B()}/op/${c.transaction_id}?recu=1">Voir le reçu</a>` : ''}</div><span class="pill ${ST[c.status][0]}">${ST[c.status][1]}</span></div>`).join('')}</div></section>` : '';
     if (!opts.length) return `${head}<p class="note">${pendP.size ? 'Votre paiement est en attente : le trésorier doit vérifier qu’il a bien reçu l’argent.' : 'Vous êtes à jour. Merci !'}</p>${hist}`;
     return `${head}
       <form class="stack" data-form="claim" novalidate>
-        <div class="field"><label for="cl-p">Mois à payer</label><select id="cl-p" name="period">${opts.map(p => opt(p, `${pFR(p)} · ${money(feeOf(me, p) - paidFor(me.id, p))}`)).join('')}</select></div>
+        <div class="field"><span style="font-size:14px;font-weight:500;color:var(--muted)" id="cl-p-l">Mois à payer</span><input type="hidden" id="cl-p" name="period" value="${esc(opts[0])}">
+          <div class="list" role="group" aria-labelledby="cl-p-l">${opts.map((p, i) => `<label class="item" style="cursor:pointer"><input type="checkbox" class="cl-mo" name="months" value="${esc(p)}" data-i="${i}" data-amt="${feeOf(me, p) - paidFor(me.id, p)}" ${defSel.has(p) ? 'checked' : ''} style="width:24px;height:24px;flex:none"><span class="body"><span class="t">${esc(pFR(p))}</span></span><b class="num">${money(feeOf(me, p) - paidFor(me.id, p))}</b></label>`).join('')}</div>
+          <p class="help">Cochez un ou plusieurs mois. Les mois les plus anciens se paient en premier.</p></div>
         <div class="big-amount"><label for="cl-a" class="muted" style="font-size:14px">Montant à envoyer (${esc(CUR_LABEL[S.ctx.assoc.currency] || 'FCFA')})</label><input id="cl-a" name="amount" type="number" inputmode="numeric" min="1" step="1"></div>
         <div class="field"><span style="font-size:14px;font-weight:500;color:var(--muted)" id="cl-m-l">Payer avec</span><div class="radios" role="radiogroup" aria-labelledby="cl-m-l">${avail.map(([l], k) => `<label><input type="radio" name="method" value="${esc(l)}" ${k === 0 ? 'checked' : ''}>${esc(l)}</label>`).join('')}</div></div>
         <section class="card stack" id="cl-dest"></section>
@@ -1236,17 +1241,27 @@
     const ps = $('#cl-p'), am = $('#cl-a'), box = $('#cl-dest');
     if (!ps) return;
     const me = S.ctx.me, fee = feeOf(me), pn = S.ctx.payNums;
-    const fill = () => { const f = feeOf(me, ps.value); am.value = Math.max(f - paidFor(me.id, ps.value), 0) || f; dest(); };
+    // Cases des mois : cocher un mois coche les plus anciens, décocher un mois décoche les suivants (v2.4.2).
+    const boxes = [...document.querySelectorAll('input.cl-mo')];
+    const selTotal = () => boxes.filter(b => b.checked).reduce((t, b) => t + Number(b.dataset.amt || 0), 0);
+    const fill = () => { am.value = selTotal() || ''; dest(); };
+    boxes.forEach(b => b.addEventListener('change', () => {
+      const i = Number(b.dataset.i);
+      boxes.forEach((x, j) => { if (b.checked && j < i) x.checked = true; if (!b.checked && j > i) x.checked = false; });
+      fill();
+    }));
     const dest = () => {
       const m = (document.querySelector('input[name=method]:checked') || {}).value || '';
       const k = (MM.find(([l]) => l === m) || [])[1], num = k ? pn[k] : '';
       const amt = Number(am.value) || 0, wl = m === 'Wave' && /^https:\/\/pay\.wave\.com\/m\//.test(pn.wave_link || '') ? pn.wave_link.replace(/\/?$/, '/') + '?amount=' + amt : '';
-      box.innerHTML = (wl ? `<a class="btn block wave-btn" href="${esc(wl)}" target="_blank" rel="noopener">Payer ${money(amt)} avec Wave</a><p class="help" style="margin:0">Wave s’ouvre avec le montant déjà rempli. Après le paiement, revenez ici et touchez « J’ai payé ».</p><span class="eyebrow" style="margin-top:4px">Ou à la main</span>` : `<span class="eyebrow">Envoyez avec votre application ${esc(m)}</span>`) + `
+      const rows = amt > 0 ? spread(me, ps.value, amt) : [];
+      const cover = !amt ? '<p class="help" style="margin:0">Cochez au moins un mois.</p>' : rows ? `<p class="help" style="margin:0">Ce paiement couvre : <b>${rows.map(x => esc(pFR(x.period)) + (x.amount < feeOf(me, x.period) - paidFor(me.id, x.period) ? ' (en partie)' : '')).join(', ')}</b>.</p>` : '<p class="note" style="margin:0">Ce montant dépasse 24 mois de cotisation. Réduisez-le.</p>';
+      const feeNote = wl ? '' : `<p class="help" style="margin:0">${m === 'Wave' ? 'Wave prend en général environ 1 % de frais à l’envoi. ' : esc(m) + ' peut prendre des frais à l’envoi, selon le montant. '}Ces frais sont à votre charge : l’association doit recevoir exactement ${money(amt)}.</p>`;
+      box.innerHTML = cover + (wl ? `<a class="btn block wave-btn" href="${esc(wl)}" target="_blank" rel="noopener">Payer ${money(amt)} avec Wave</a><p class="help" style="margin:0">Wave s’ouvre avec le montant déjà rempli. Après le paiement, revenez ici et touchez « J’ai payé ».</p><span class="eyebrow" style="margin-top:4px">Ou à la main</span>` : `<span class="eyebrow">Envoyez avec votre application ${esc(m)}</span>`) + `
         <div class="between" style="flex-wrap:wrap"><span><span class="muted" style="font-size:14px">Au numéro</span><br><b class="num" style="font-size:20px">${esc(num)}</b></span><button type="button" class="btn ghost sm" data-act="copy" data-v="${esc(num.replace(/\s/g, ''))}">Copier le numéro</button></div>
         <div class="between" style="flex-wrap:wrap"><span><span class="muted" style="font-size:14px">Montant</span><br><b class="num" style="font-size:20px">${money(Number(am.value) || 0)}</b></span><button type="button" class="btn ghost sm" data-act="copy" data-v="${esc(String(Number(am.value) || 0))}">Copier le montant</button></div>
-        <p class="note" style="margin:0">Avant de valider dans ${esc(m)}, vérifiez que le nom affiché est bien <b>${esc(pn.holder)}</b>. Sinon, n’envoyez rien et prévenez le bureau.</p>`;
+        ${feeNote}<p class="note" style="margin:0">Avant de valider dans ${esc(m)}, vérifiez que le nom affiché est bien <b>${esc(pn.holder)}</b>. Sinon, n’envoyez rien et prévenez le bureau.</p>`;
     };
-    ps.addEventListener('change', fill);
     am.addEventListener('input', dest);
     document.querySelectorAll('input[name=method]').forEach(r => r.addEventListener('change', dest));
     fill();
@@ -1258,11 +1273,11 @@
       if (r.method) { const rb = document.querySelector(`input[name=method][value="${r.method}"]`); if (rb && !rb.checked) rb.checked = true; }
       const meth = (document.querySelector('input[name=method]:checked') || {}).value || '';
       const k = (MM.find(([l]) => l === meth) || [])[1], num = k ? pn[k] : '';
-      const ef = feeOf(me, ps.value), expected = Math.max(ef - paidFor(me.id, ps.value), 0) || ef, items = [];
+      const expected = selTotal(), items = [], lbl = boxes.filter(b => b.checked).length > 1 ? 'des mois cochés' : 'de ' + pFR(ps.value);
       if (r.amount) {
         am.value = r.amount;
         if (r.sent && r.sent !== r.amount) items.push(['warn', `Vous avez envoyé ${money(r.sent)}, l’association a reçu ${money(r.amount)}${r.fee ? ` (frais ${money(r.fee)} déduits)` : ''}. C’est ${money(r.amount)} qui sera compté.`]);
-        items.push(r.amount === expected ? ['ok', 'Montant reçu : ' + money(r.amount)] : r.amount < expected ? ['warn', `Il manque ${money(expected - r.amount)} pour la cotisation de ${pFR(ps.value)} (${money(expected)}).${r.fee ? ' La prochaine fois, ajoutez les frais au montant envoyé.' : ''}`] : ['warn', `Montant reçu : ${money(r.amount)}, plus que la cotisation de ${pFR(ps.value)} (${money(expected)}).`]);
+        items.push(r.amount === expected ? ['ok', 'Montant reçu : ' + money(r.amount)] : r.amount < expected ? ['warn', `Il manque ${money(expected - r.amount)} pour la cotisation ${lbl} (${money(expected)}).${r.fee ? ' La prochaine fois, ajoutez les frais au montant envoyé.' : ''}`] : ['warn', `Montant reçu : ${money(r.amount)}, plus que la cotisation ${lbl} (${money(expected)}).`]);
       }
       else items.push(['warn', 'Montant non trouvé : saisissez-le à la main.']);
       if (r.reference) { $('#cl-r').value = r.reference; items.push(['ok', 'Référence : ' + r.reference]); }
@@ -2650,6 +2665,7 @@ Abstention</textarea><p class="help">Entre 2 et 10 choix.</p></div>
     async claim(fd) {
       const me = S.ctx.me, period = val(fd, 'period'), amount = Number(val(fd, 'amount').replace(',', '.')); if (Number.isFinite(amount) && !Number.isInteger(amount)) fail('Écrivez le montant en chiffres, sans point ni virgule : 1500, pas 1.500.');
       if (!/^\d{4}-\d{2}$/.test(period)) fail('Choisissez le mois à payer.');
+      if (document.querySelector('input.cl-mo') && !fd.getAll('months').length) fail('Cochez au moins un mois.');
       if (!(amount > 0)) fail('Saisissez le montant envoyé.');
       const method = val(fd, 'method'); if (!method) fail('Choisissez Wave, Orange Money ou Free Money.');
       must(await sb.rpc('declare_payment', { p_member: me.id, p_period: period, p_amount: amount, p_method: method, p_reference: val(fd, 'reference') }));
